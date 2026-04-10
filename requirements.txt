@@ -1,0 +1,9 @@
+Flask-SQLAlchemy==3.0.2
+boto3==1.37.23
+pydantic~=2.10.0
+alembic==1.11.1
+beautifulsoup4==4.12.2
+hvac==1.1.1
+apache-libcloud==3.8.0
+fasteners==0.19
+pydantic-settings
