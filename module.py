@@ -35,13 +35,78 @@ class Module(module.ModuleModel):
     def preload(self):
         """ Preload handler """
         from pylon.core.tools.context import Context as Holder
+        #
+        noop_func = lambda *args, **kwargs: None
+        noop_decorator = lambda *args, **kwargs: lambda func: func
+        #
         dummy = Holder()
         #
         self.descriptor.register_tool('constants', dummy)
-        self.descriptor.register_tool('config', dummy)
-        self.descriptor.register_tool('db', dummy)
         self.descriptor.register_tool('db_migrations', dummy)
         self.descriptor.register_tool('VaultClient', dummy)
+        self.descriptor.register_tool('MinioClient', dummy)
+        #
+        dummy_openapi_registry = Holder()
+        dummy_openapi_registry.register_plugin = noop_func
+        #
+        self.descriptor.register_tool('openapi_registry', dummy_openapi_registry)
+        #
+        dummy_config = Holder()
+        dummy_config.POSTGRES_SCHEMA = "dummy"
+        dummy_config.POSTGRES_TENANT_SCHEMA = "dummy"
+        dummy_config.FORCE_INJECT_DB = True
+        dummy_config.DATABASE_URI = "duckdb:///:memory:"
+        dummy_config.DATABASE_ENGINE_OPTIONS = {}
+        dummy_config.DEFAULT_MODE = "dummy"
+        dummy_config.VAULT_ADMINISTRATION_NAME = "dummy"
+        dummy_config.SECRETS_ENGINE = "database"
+        #
+        self.descriptor.register_tool('config', dummy_config)
+        #
+        class dummy_class_a:
+            def __init__(self, *args, **kwargs):
+                pass
+            #
+            metadata = Holder()
+            metadata.tables = {}
+            metadata._add_table = lambda *args, **kwargs: None
+            metadata._remove_table = lambda *args, **kwargs: None
+            metadata.naming_convention = {}
+            metadata._fk_memos = {
+                ('dummy.project', 'id'): [],
+                ('dummy.project_group', 'id'): [],
+                ('dummy.application_versions', 'id'): [],
+                ('dummy.tags', 'id'): [],
+                ('dummy.prompt_versions', 'id'): [],
+            }
+        #
+        dummy_db = Holder()
+        dummy_db.Base = dummy_class_a
+        #
+        self.descriptor.register_tool('db', dummy_db)
+        #
+        class dummy_class_b:
+            def __init__(self, *args, **kwargs):
+                pass
+            #
+            __table__ = "dummy"
+        #
+        dummy_db_tools = Holder()
+        dummy_db_tools.AbstractBaseMixin = dummy_class_b
+        #
+        self.descriptor.register_tool('db_tools', dummy_db_tools)
+        #
+        class dummy_class_c:
+            def __init__(self, *args, **kwargs):
+                pass
+        #
+        dummy_rpc_tools = Holder()
+        dummy_rpc_tools.RpcMixin = dummy_class_c
+        #
+        self.descriptor.register_tool('rpc_tools', dummy_rpc_tools)
+        #
+        self.descriptor.register_tool('register_openapi', noop_decorator)
+        self.descriptor.register_tool('serialize', noop_func)
 
     def init(self):
         """ Init module """
