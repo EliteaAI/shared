@@ -288,11 +288,12 @@ def endpoint_metrics(function):
 
         req_body = dict()
         if request.content_type == 'application/json':
-            if request.json:
-                try:
-                    req_body = dict(request.json)
-                except Exception as e:
-                    log.warning(f'endpoint_metrics body issue {req_body}')
+            try:
+                json_data = request.get_json(silent=True)
+                if json_data:
+                    req_body = dict(json_data)
+            except Exception as e:
+                log.warning(f'endpoint_metrics body issue: {e}')
 
         payload = {
             'trace_id': trace_id,  # Include trace ID in metrics
