@@ -283,6 +283,8 @@ class OpenAPIRegistry:
         }
 
         self._build_paths(spec, plugin_name)
+        spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
+        spec["tags"] = _order_openapi_tags(spec["tags"])
         return spec
 
     def get_combined_spec(self, plugins: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -290,7 +292,7 @@ class OpenAPIRegistry:
         spec = {
             "openapi": "3.1.0",
             "info": {
-                "title": "Elitea Platform API",
+                "title": "Elitea AI Platform",
                 "version": "1.0.0",
                 "description": "Elitea Platform REST API — explore and integrate with agents, configurations, notifications, and more.",
             },
@@ -321,6 +323,7 @@ class OpenAPIRegistry:
                 spec["tags"].extend(self._plugins[plugin_name]["tags"])
                 self._build_paths(spec, plugin_name)
 
+        spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
         spec["tags"] = _order_openapi_tags(spec["tags"])
 
         return spec
@@ -486,18 +489,41 @@ def _sanitize_mcp_tool_name(parts: list) -> str:
     return ''.join(processed_parts)
 
 
+def _collect_spec_tags_from_paths(paths: Dict[str, Any], existing_tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build tag list from actual operations and keep known descriptions when available."""
+    known_tags = {
+        str(tag.get("name", "")): tag
+        for tag in existing_tags
+        if isinstance(tag, dict) and tag.get("name")
+    }
+
+    used_tag_names = set()
+    for methods in paths.values():
+        if not isinstance(methods, dict):
+            continue
+        for operation in methods.values():
+            if not isinstance(operation, dict):
+                continue
+            for tag_name in operation.get("tags", []):
+                if tag_name:
+                    used_tag_names.add(str(tag_name))
+
+    return [known_tags.get(name, {"name": name}) for name in used_tag_names]
+
+
 def _order_openapi_tags(tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Pin elitea_core tag first and keep the rest sorted by tag name."""
+    """Show elitea_core (and elitea_core/*) tags first, then sort remaining tags."""
     elitea_core_tags = []
     other_tags = []
 
     for tag in tags:
         tag_name = str(tag.get("name", ""))
-        if tag_name == "elitea_core":
+        if tag_name == "elitea_core" or tag_name.startswith("elitea_core/"):
             elitea_core_tags.append(tag)
         else:
             other_tags.append(tag)
 
+    elitea_core_tags.sort(key=lambda t: str(t.get("name", "")).lower())
     other_tags.sort(key=lambda t: str(t.get("name", "")).lower())
     return elitea_core_tags + other_tags
 
