@@ -79,12 +79,14 @@
         </div>
     </header>
     <div id="swagger-ui"></div>
+    <script id="openapi-spec" type="application/json">{{ spec_json|safe }}</script>
     <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
     <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
     <script>
         window.onload = function() {
+            const embeddedSpec = JSON.parse(document.getElementById('openapi-spec').textContent);
             window.ui = SwaggerUIBundle({
-                url: "{{ spec_url }}",
+                spec: embeddedSpec,
                 dom_id: '#swagger-ui',
                 deepLinking: true,
                 presets: [
