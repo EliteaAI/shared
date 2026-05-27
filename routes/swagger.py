@@ -11,19 +11,13 @@ class Route:
     @web.route("/swagger/", methods=["GET"], endpoint="swagger_ui")
     @web.route("/swagger/<string:plugin_name>", methods=["GET"], endpoint="swagger_ui_plugin")
     def swagger(self, plugin_name: str = None):
-        """Serve Swagger UI.
-
-        Args:
-            plugin_name: Plugin name for single-plugin spec (optional)
-        """
         if plugin_name:
             spec_url = f"/shared/openapi/{plugin_name}"
-            title = f"Swagger UI - {plugin_name}"
+            title = f"Elitea - Swagger ({plugin_name.replace('_', ' ').title()})"
         else:
             spec_url = "/shared/openapi/"
-            title = "Swagger UI - All Plugins"
+            title = "Elitea - Swagger"
 
-        # Load template from file
         template_path = Path(this.descriptor.path) / "templates" / "swagger.html"
         template_content = template_path.read_text()
 

@@ -4,18 +4,83 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }}</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" />
+    <link rel="icon" type="image/png" href="https://avatars.githubusercontent.com/u/147170315?s=100" />
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css" />
     <style>
         html { box-sizing: border-box; overflow-y: scroll; }
         *, *:before, *:after { box-sizing: inherit; }
         body { margin: 0; background: #fafafa; }
         .swagger-ui .topbar { display: none; }
+
+        .elitea-header {
+            background: #1a1a2e;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .elitea-header-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .elitea-logo {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+        }
+        .elitea-header-title {
+            color: #fff;
+            font-size: 18px;
+            font-weight: 600;
+            font-family: sans-serif;
+        }
+        .elitea-header-subtitle {
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 13px;
+            font-family: sans-serif;
+            margin-left: 4px;
+        }
+        .elitea-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .elitea-json-link {
+            color: #49cc90;
+            background: rgba(73, 204, 144, 0.1);
+            border: 1px solid #49cc90;
+            padding: 6px 16px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 13px;
+            font-family: sans-serif;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .elitea-json-link:hover {
+            background: rgba(73, 204, 144, 0.2);
+        }
     </style>
 </head>
 <body>
+    <header class="elitea-header">
+        <div class="elitea-header-brand">
+            <img src="https://avatars.githubusercontent.com/u/147170315?s=100" alt="Elitea" class="elitea-logo" />
+            <span class="elitea-header-title">Elitea</span>
+            <span class="elitea-header-subtitle">API Documentation</span>
+        </div>
+        <div class="elitea-header-actions">
+            <a href="{{ spec_url }}" class="elitea-json-link" target="_blank">OpenAPI JSON</a>
+        </div>
+    </header>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
-    <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-standalone-preset.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
     <script>
         window.onload = function() {
             window.ui = SwaggerUIBundle({

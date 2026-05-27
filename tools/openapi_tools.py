@@ -49,25 +49,52 @@ def pydantic_to_openapi_schema(model: Type[BaseModel]) -> Tuple[Dict[str, Any], 
     except AttributeError:
         schema = model.schema()
 
-    # Extract $defs to be added at root level
-    definitions = {}
-    if "$defs" in schema:
-        definitions = schema.pop("$defs")
+    # Extract nested definitions ($defs/definitions) to components/schemas.
+    # Pydantic v2 may place nested refs under $defs; Swagger resolver expects
+    # them under components/schemas in the final OpenAPI document.
+    definitions = _extract_definitions(schema)
 
-    # Convert internal $ref to OpenAPI format
+    # Convert internal $ref to OpenAPI components format in both root and extracted defs.
     schema = _convert_refs_to_components(schema)
+    definitions = _convert_refs_to_components(definitions)
 
     return schema, definitions
+
+
+def _extract_definitions(obj: Any) -> Dict[str, Any]:
+    """Recursively collect and remove nested $defs/definitions blocks."""
+    collected: Dict[str, Any] = {}
+
+    if isinstance(obj, dict):
+        for defs_key in ("$defs", "definitions"):
+            nested_defs = obj.pop(defs_key, None)
+            if isinstance(nested_defs, dict):
+                for schema_name, schema_value in nested_defs.items():
+                    # Recursively strip nested defs from each extracted schema.
+                    nested_collected = _extract_definitions(schema_value)
+                    collected[schema_name] = schema_value
+                    collected.update(nested_collected)
+
+        for value in obj.values():
+            collected.update(_extract_definitions(value))
+
+    elif isinstance(obj, list):
+        for item in obj:
+            collected.update(_extract_definitions(item))
+
+    return collected
 
 
 def _convert_refs_to_components(obj):
     """Recursively convert $defs references to #/components/schemas/ references."""
     if isinstance(obj, dict):
         if "$ref" in obj:
-            # Convert #/$defs/ModelName to #/components/schemas/ModelName
+            # Convert JSON Schema refs to OpenAPI components refs.
             ref = obj["$ref"]
             if ref.startswith("#/$defs/"):
                 obj["$ref"] = ref.replace("#/$defs/", "#/components/schemas/")
+            elif ref.startswith("#/definitions/"):
+                obj["$ref"] = ref.replace("#/definitions/", "#/components/schemas/")
         return {k: _convert_refs_to_components(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_convert_refs_to_components(item) for item in obj]
@@ -229,7 +256,7 @@ class OpenAPIRegistry:
         plugin_info = self._plugins[plugin_name]
 
         spec = {
-            "openapi": "3.0.3",
+            "openapi": "3.1.0",
             "info": {
                 "title": f"{plugin_name.replace('_', ' ').title()} API",
                 "version": plugin_info["version"],
@@ -261,11 +288,11 @@ class OpenAPIRegistry:
     def get_combined_spec(self, plugins: Optional[List[str]] = None) -> Dict[str, Any]:
         """Generate combined OpenAPI spec for multiple plugins."""
         spec = {
-            "openapi": "3.0.3",
+            "openapi": "3.1.0",
             "info": {
                 "title": "Elitea Platform API",
                 "version": "1.0.0",
-                "description": "Combined API specification",
+                "description": "Elitea Platform REST API — explore and integrate with agents, configurations, notifications, and more.",
             },
             "paths": {},
             "components": {
@@ -293,6 +320,8 @@ class OpenAPIRegistry:
             if plugin_name in self._plugins:
                 spec["tags"].extend(self._plugins[plugin_name]["tags"])
                 self._build_paths(spec, plugin_name)
+
+        spec["tags"] = _order_openapi_tags(spec["tags"])
 
         return spec
 
@@ -455,6 +484,22 @@ def _sanitize_mcp_tool_name(parts: list) -> str:
         processed_parts.append(processed)
 
     return ''.join(processed_parts)
+
+
+def _order_openapi_tags(tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pin elitea_core tag first and keep the rest sorted by tag name."""
+    elitea_core_tags = []
+    other_tags = []
+
+    for tag in tags:
+        tag_name = str(tag.get("name", ""))
+        if tag_name == "elitea_core":
+            elitea_core_tags.append(tag)
+        else:
+            other_tags.append(tag)
+
+    other_tags.sort(key=lambda t: str(t.get("name", "")).lower())
+    return elitea_core_tags + other_tags
 
 # Global registry instance
 openapi_registry = OpenAPIRegistry()
