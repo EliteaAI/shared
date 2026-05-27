@@ -7,11 +7,21 @@ Endpoints:
 - GET /shared/openapi/ - Combined spec for all plugins
 - GET /shared/openapi/<plugin_name> - Single plugin spec (or "plugins" to list)
 """
+import json
+
 import flask
 
 from pylon.core.tools import web
 
 from ..tools.openapi_tools import openapi_registry
+
+def _json_response(data, status=200):
+    """Return an explicit JSON response with correct Content-Type."""
+    return flask.Response(
+        json.dumps(data),
+        status=status,
+        mimetype="application/json",
+    )
 
 
 class Route:
@@ -34,16 +44,16 @@ class Route:
 
         # List registered plugins
         if plugin_name == "plugins":
-            return {"plugins": openapi_registry.list_plugins()}, 200
+            return _json_response({"plugins": openapi_registry.list_plugins()})
 
         # Single plugin spec
         if plugin_name:
             spec = openapi_registry.get_plugin_spec(plugin_name)
             if not spec:
-                return {
+                return _json_response({
                     "error": f"Plugin '{plugin_name}' not found",
                     "available": openapi_registry.list_plugins()
-                }, 404
+                }, status=404)
         else:
             # Combined spec
             plugins_filter = flask.request.args.get('plugins')
@@ -61,9 +71,9 @@ class Route:
                 return flask.Response(
                     yaml_content,
                     mimetype='application/x-yaml',
-                    headers={'Content-Disposition': 'inline; filename=openapi.yaml'}
+                    headers={'Content-Disposition': 'inline; filename=openapi.yaml'},
                 )
             except ImportError:
-                return {"error": "YAML not available. Install PyYAML."}, 501
+                return _json_response({"error": "YAML not available. Install PyYAML."}, status=501)
 
-        return spec, 200
+        return _json_response(spec)
