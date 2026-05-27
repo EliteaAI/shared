@@ -294,7 +294,12 @@ class OpenAPIRegistry:
             "info": {
                 "title": "Elitea AI Platform",
                 "version": "1.0.0",
-                "description": "Elitea Platform REST API — explore and integrate with agents, configurations, notifications, and more.",
+                "description": "REST API for the Elitea AI Platform. Provides programmatic access to project-scoped "
+                               "resources including agents, pipelines, toolkits, conversations, MCP integrations, "
+                               "settings, analytics, and runtime utilities. Supports the full agent/pipeline "
+                               "lifecycle — create, configure, execute, publish, fork, import, and export. "
+                               "All resources are scoped to a project. Most endpoints require Bearer token "
+                               "authentication and role-based permissions.",
             },
             "paths": {},
             "components": {
