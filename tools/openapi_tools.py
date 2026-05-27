@@ -527,6 +527,7 @@ def _order_openapi_tags(tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     other_tags.sort(key=lambda t: str(t.get("name", "")).lower())
     return elitea_core_tags + other_tags
 
+
 # Global registry instance
 openapi_registry = OpenAPIRegistry()
 
