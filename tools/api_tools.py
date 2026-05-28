@@ -186,7 +186,7 @@ class APIBase(Resource):
     url_params = list()
 
     def proxy_method(self, method: str, mode: str = 'default', **kwargs):
-        log.info(f'API call: method: {method=} mode: {mode=} {kwargs=}')
+        log.debug(f'API call: method: {method=} mode: {mode=} {kwargs=}')
         handler = self.mode_handlers.get(mode)
         if not handler:
             log.warning(f'api handler not found for mode: {mode}')
