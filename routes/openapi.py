@@ -41,6 +41,7 @@ class Route:
             plugins: Comma-separated list of plugins (for combined spec)
         """
         output_format = flask.request.args.get('format', 'json').lower()
+        full = flask.request.args.get('all', '').lower() == 'true'
 
         # List registered plugins
         if plugin_name == "plugins":
@@ -48,7 +49,7 @@ class Route:
 
         # Single plugin spec
         if plugin_name:
-            spec = openapi_registry.get_plugin_spec(plugin_name)
+            spec = openapi_registry.get_plugin_spec(plugin_name, full=full)
             if not spec:
                 return _json_response({
                     "error": f"Plugin '{plugin_name}' not found",
@@ -61,7 +62,7 @@ class Route:
                 plugins = [p.strip() for p in plugins_filter.split(',')]
             else:
                 plugins = None
-            spec = openapi_registry.get_combined_spec(plugins)
+            spec = openapi_registry.get_combined_spec(plugins, full=full)
 
         # Output format
         if output_format == 'yaml':

@@ -224,6 +224,7 @@ class OpenAPIRegistry:
         security: Optional[List[Dict]] = None,
         deprecated: bool = False,
         mcp_tool: bool = False,
+        available_to_users: bool = False,
     ) -> None:
         """Register an API endpoint."""
         if plugin_name not in self._endpoints:
@@ -245,10 +246,11 @@ class OpenAPIRegistry:
             "security": security,
             "deprecated": deprecated,
             "mcp_tool": mcp_tool,
+            "available_to_users": available_to_users,
         })
 
 
-    def get_plugin_spec(self, plugin_name: str) -> Dict[str, Any]:
+    def get_plugin_spec(self, plugin_name: str, full: bool = True) -> Dict[str, Any]:
         """Generate OpenAPI spec for a single plugin."""
         if plugin_name not in self._plugins:
             return {}
@@ -282,12 +284,12 @@ class OpenAPIRegistry:
             "tags": plugin_info["tags"],
         }
 
-        self._build_paths(spec, plugin_name)
+        self._build_paths(spec, plugin_name, full=full)
         spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
         spec["tags"] = _order_openapi_tags(spec["tags"])
         return spec
 
-    def get_combined_spec(self, plugins: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_combined_spec(self, plugins: Optional[List[str]] = None, full: bool = True) -> Dict[str, Any]:
         """Generate combined OpenAPI spec for multiple plugins."""
         spec = {
             "openapi": "3.1.0",
@@ -326,16 +328,18 @@ class OpenAPIRegistry:
         for plugin_name in target_plugins:
             if plugin_name in self._plugins:
                 spec["tags"].extend(self._plugins[plugin_name]["tags"])
-                self._build_paths(spec, plugin_name)
+                self._build_paths(spec, plugin_name, full=full)
 
         spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
         spec["tags"] = _order_openapi_tags(spec["tags"])
 
         return spec
 
-    def _build_paths(self, spec: Dict, plugin_name: str) -> None:
+    def _build_paths(self, spec: Dict, plugin_name: str, full: bool = True) -> None:
         """Build paths section for a plugin."""
         for endpoint in self._endpoints.get(plugin_name, []):
+            if not full and not endpoint.get("available_to_users", False):
+                continue
             path = endpoint["path"]
             method = endpoint["method"]
 
@@ -547,6 +551,7 @@ def register_openapi(
     responses: Optional[Dict] = None,
     deprecated: bool = False,
     mcp_tool: bool = False,
+    available_to_users: bool = False,
 ):
     """
     Decorator to document API methods with OpenAPI metadata.
@@ -575,6 +580,7 @@ def register_openapi(
             "responses": responses,
             "deprecated": deprecated,
             "mcp_tool": mcp_tool,
+            "available_to_users": available_to_users,
         }
         return func
 
@@ -715,6 +721,7 @@ def register_api_class(
                 responses=openapi_meta.get("responses"),
                 deprecated=openapi_meta.get("deprecated", False),
                 mcp_tool=openapi_meta.get("mcp_tool", False),
+                available_to_users=openapi_meta.get("available_to_users", False),
             )
             endpoints_registered += 1
 
