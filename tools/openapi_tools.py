@@ -168,6 +168,10 @@ class OpenAPIRegistry:
     def __init__(self):
         self._plugins: Dict[str, Dict] = {}
         self._endpoints: Dict[str, List[Dict]] = {}
+        self._spec_cache: Dict[str, Any] = {}
+
+    def _invalidate_cache(self) -> None:
+        self._spec_cache.clear()
 
     def register_plugin(
         self,
@@ -197,6 +201,7 @@ class OpenAPIRegistry:
         }
         if plugin_name not in self._endpoints:
             self._endpoints[plugin_name] = []
+        self._invalidate_cache()
 
         # Auto-register APIs from module if provided
         if api_module is not None:
@@ -248,12 +253,16 @@ class OpenAPIRegistry:
             "mcp_tool": mcp_tool,
             "available_to_users": available_to_users,
         })
+        self._invalidate_cache()
 
 
     def get_plugin_spec(self, plugin_name: str, full: bool = True) -> Dict[str, Any]:
         """Generate OpenAPI spec for a single plugin."""
         if plugin_name not in self._plugins:
             return {}
+        cache_key = f"plugin:{plugin_name}:full={full}"
+        if cache_key in self._spec_cache:
+            return self._spec_cache[cache_key]
 
         plugin_info = self._plugins[plugin_name]
 
@@ -287,10 +296,14 @@ class OpenAPIRegistry:
         self._build_paths(spec, plugin_name, full=full)
         spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
         spec["tags"] = _order_openapi_tags(spec["tags"])
+        self._spec_cache[cache_key] = spec
         return spec
 
     def get_combined_spec(self, plugins: Optional[List[str]] = None, full: bool = True) -> Dict[str, Any]:
         """Generate combined OpenAPI spec for multiple plugins."""
+        cache_key = f"combined:{','.join(sorted(plugins)) if plugins else 'all'}:full={full}"
+        if cache_key in self._spec_cache:
+            return self._spec_cache[cache_key]
         spec = {
             "openapi": "3.1.0",
             "info": {
@@ -332,7 +345,7 @@ class OpenAPIRegistry:
 
         spec["tags"] = _collect_spec_tags_from_paths(spec["paths"], spec.get("tags", []))
         spec["tags"] = _order_openapi_tags(spec["tags"])
-
+        self._spec_cache[cache_key] = spec
         return spec
 
     def _build_paths(self, spec: Dict, plugin_name: str, full: bool = True) -> None:
@@ -439,6 +452,9 @@ class OpenAPIRegistry:
         """
         Returns: list of MCP Tool dictionaries with name, description, and inputSchema
         """
+        cache_key = f"mcp:{','.join(sorted(plugins)) if plugins else 'all'}:deprecated={include_deprecated}"
+        if cache_key in self._spec_cache:
+            return self._spec_cache[cache_key]
         tools = []
         target_plugins = plugins or list(self._plugins.keys())
         for plugin_name in target_plugins:
@@ -452,6 +468,7 @@ class OpenAPIRegistry:
                 tool = self._endpoint_to_mcp_tool(endpoint)
                 if tool:
                     tools.append(tool)
+        self._spec_cache[cache_key] = tools
         return tools
 
     def _endpoint_to_mcp_tool(
