@@ -221,6 +221,7 @@ class OpenAPIRegistry:
         method: str,
         name: str,
         description: str = "",
+        mcp_description: str = "",
         tags: Optional[List[str]] = None,
         parameters: Optional[List[Dict]] = None,
         request_body: Optional[Type[BaseModel]] = None,
@@ -243,6 +244,7 @@ class OpenAPIRegistry:
             "method": method.lower(),
             "name": name,
             "description": description,
+            "mcp_description": mcp_description,
             "tags": tags or [plugin_name],
             "parameters": parameters or [],
             "request_body": request_body,
@@ -481,7 +483,8 @@ class OpenAPIRegistry:
         method = endpoint["method"]
         path = endpoint["path"]
         name = endpoint.get("name", "")
-        description = endpoint.get("description", "") or name
+        mcp_description = endpoint.get("mcp_description", "")
+        description = mcp_description or endpoint.get("description", "") or name
         path_parts = [p for p in path.split("/") if p and not p.startswith("{")]
         tool_name = _sanitize_mcp_tool_name([method] + path_parts[-2:])
 
@@ -561,6 +564,7 @@ openapi_registry = OpenAPIRegistry()
 def register_openapi(
     name: str,
     description: str = "",
+    mcp_description: str = "",
     tags: Optional[List[str]] = None,
     parameters: Optional[List[Dict]] = None,
     request_body: Optional[Type[BaseModel]] = None,
@@ -590,6 +594,7 @@ def register_openapi(
         func._openapi = {
             "name": name,
             "description": description,
+            "mcp_description": mcp_description,
             "tags": tags or [],
             "parameters": parameters or [],
             "request_body": request_body,
@@ -731,6 +736,7 @@ def register_api_class(
                 method=method_name,
                 name=openapi_meta["name"],
                 description=openapi_meta.get("description", ""),
+                mcp_description=openapi_meta.get("mcp_description", ""),
                 tags=openapi_meta.get("tags") or [plugin_name],
                 parameters=all_params,
                 request_body=openapi_meta.get("request_body"),
