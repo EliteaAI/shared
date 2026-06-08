@@ -446,15 +446,28 @@ class OpenAPIRegistry:
         """List all registered plugins."""
         return list(self._plugins.keys())
 
+    def get_known_mcp_tags(self) -> set:
+        """Return all distinct tags used by endpoints with mcp_tool=True."""
+        tags = set()
+        for endpoints in self._endpoints.values():
+            for ep in endpoints:
+                if ep.get("mcp_tool", False):
+                    tags.update(ep.get("tags", []))
+        return tags
+
     def get_mcp_api_tools(
         self,
         plugins: Optional[List[str]] = None,
         include_deprecated: bool = False,
+        filter_tags: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Returns: list of MCP Tool dictionaries with name, description, and inputSchema
+
+        Args:
+            filter_tags: If provided, only return tools whose tags intersect with this list.
         """
-        cache_key = f"mcp:{','.join(sorted(plugins)) if plugins else 'all'}:deprecated={include_deprecated}"
+        cache_key = f"mcp:{','.join(sorted(plugins)) if plugins else 'all'}:deprecated={include_deprecated}:tags={','.join(sorted(filter_tags)) if filter_tags else 'all'}"
         if cache_key in self._spec_cache:
             return self._spec_cache[cache_key]
         tools = []
@@ -466,6 +479,8 @@ class OpenAPIRegistry:
                 if endpoint.get("deprecated", False) and not include_deprecated:
                     continue
                 if not endpoint.get("mcp_tool", False):
+                    continue
+                if filter_tags and not set(endpoint.get("tags", [])) & set(filter_tags):
                     continue
                 tool = self._endpoint_to_mcp_tool(endpoint)
                 if tool:
