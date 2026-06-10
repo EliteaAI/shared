@@ -254,12 +254,29 @@ class Module(module.ModuleModel):
                 project_list = self.context.rpc_manager.timeout(120).project_list(
                     filter_={"create_success": True},
                 )
+                project_ids = [project_["id"] for project_ in project_list]
+                log.debug(f"Got {len(project_ids)} projects")
                 #
-                for project in project_list:
-                    log.info("Applying project metadata: %s", project)
-                    with db.get_session(project["id"]) as tenant_db:
-                        tenant_metadata.create_all(bind=tenant_db.connection())
-                        tenant_db.commit()
+                batch_size = self.descriptor.config.get("apply_project_metadata_batch_size", 100)
+                #
+                def partition(project_ids_, batch_size_):
+                    for i in range(0, len(project_ids_), batch_size_):
+                        yield project_ids_[i:i + batch_size_]
+                #
+                projects_partitions = partition(project_ids, batch_size)
+                #
+                def create_projects_metadata(projects_ids: list[int]):
+                    for project_id in projects_ids:
+                        log.info("Applying project metadata: %s", project_id)
+                        with db.get_session(project_id) as tenant_db:
+                            tenant_metadata.create_all(bind=tenant_db.connection())
+                            tenant_db.commit()
+                #
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor() as executor:
+                    for partition in projects_partitions:
+                        executor.submit(create_projects_metadata, partition)
+                #
         except Exception:  # pylint: disable=W0703
             log.warning("Shared ready: failed to apply DB metadata (database may not be available)")
 
