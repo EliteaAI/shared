@@ -548,20 +548,17 @@ class OpenAPIRegistry:
 
 
 def _sanitize_mcp_tool_name(parts: list) -> str:
-    """Convert list of parts to camelCase."""
+    """Convert list of parts to snake_case (e.g. 'get_elitea_core_applications')."""
     if not parts:
         return ""
 
-    processed_parts = []
-    for i, part in enumerate(parts):
-        sub_parts = part.split('_')
-        if i == 0:
-            processed = sub_parts[0].lower() + ''.join(sp.capitalize() for sp in sub_parts[1:])
-        else:
-            processed = ''.join(sp.capitalize() for sp in sub_parts)
-        processed_parts.append(processed)
+    words = []
+    for part in parts:
+        for sub in part.split('_'):
+            if sub:
+                words.append(sub.lower())
 
-    return ''.join(processed_parts)
+    return '_'.join(words)
 
 
 def _collect_spec_tags_from_paths(paths: Dict[str, Any], existing_tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
