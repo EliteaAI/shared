@@ -102,6 +102,36 @@ def _convert_refs_to_components(obj):
         return obj
 
 
+def _resolve_refs(obj: Any, definitions: Dict[str, Any]) -> Any:
+    """Inline $ref values using the definitions map so MCP clients see concrete schemas."""
+    if isinstance(obj, dict):
+        if "$ref" in obj and len(obj) == 1:
+            ref = obj["$ref"]
+            name = ref.split("/")[-1]
+            if name in definitions:
+                return _resolve_refs(definitions[name], definitions)
+            return obj
+        return {k: _resolve_refs(v, definitions) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_refs(item, definitions) for item in obj]
+    return obj
+
+
+def _flatten_nullable(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Simplify anyOf/oneOf: [T, {type:null}] → T so MCP clients treat it as object, not string."""
+    any_of = schema.get("anyOf") or schema.get("oneOf")
+    if not isinstance(any_of, list):
+        return schema
+    non_null = [s for s in any_of if s != {"type": "null"} and s.get("type") != "null"]
+    if len(non_null) == 1:
+        merged = {**non_null[0]}
+        for k, v in schema.items():
+            if k not in ("anyOf", "oneOf") and k not in merged:
+                merged[k] = v
+        return merged
+    return schema
+
+
 def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build MCP inputSchema from OpenAPI endpoint parameters and request body.
@@ -129,10 +159,11 @@ def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
     request_body = endpoint.get("request_body")
     if request_body is not None:
         try:
-            body_schema, _ = pydantic_to_openapi_schema(request_body)
+            body_schema, definitions = pydantic_to_openapi_schema(request_body)
             if "properties" in body_schema:
                 for prop_name, prop_schema in body_schema["properties"].items():
-                    properties[prop_name] = prop_schema
+                    resolved = _resolve_refs(prop_schema, definitions)
+                    properties[prop_name] = _flatten_nullable(resolved)
                 if "required" in body_schema:
                     required.extend(body_schema["required"])
         except Exception as e:
@@ -688,23 +719,9 @@ def register_api_class(
     if registry is None:
         registry = openapi_registry
 
+    import inspect
+
     url_params = getattr(api_class, "url_params", [])
-
-    # Build full path and extract params
-    if url_params:
-        # When using with_modes(), multiple patterns are generated
-        # Select the pattern with the MOST parameters (most complete)
-        # This ensures we document all possible parameters in OpenAPI
-        url_suffix = max(url_params, key=lambda x: x.count('<'))
-        full_path = f"{base_path}/{url_suffix}" if url_suffix else base_path
-        # Extract path params from the most complete pattern
-        path_params = extract_path_params_from_url([url_suffix])
-    else:
-        full_path = base_path
-        path_params = []
-
-    # Convert to OpenAPI format
-    full_path = full_path.replace("<int:", "{").replace("<string:", "{").replace(">", "}")
 
     # Check for mode handlers (e.g., elitea_core pattern)
     mode_handlers = getattr(api_class, "mode_handlers", {})
@@ -716,6 +733,54 @@ def register_api_class(
         classes_to_check.extend(mode_handlers.values())
         # Set default mode to first mode handler key (typically 'prompt_lib')
         default_mode = list(mode_handlers.keys())[0]
+
+    def _pick_url_suffix_for_method(method):
+        """Pick the URL pattern that best matches the method's parameter names.
+
+        When mode_handlers are present, prefers patterns that include <string:mode>
+        so Flask correctly dispatches to the right handler class.
+        """
+        if not url_params:
+            return None
+
+        # Collect parameter names from the method signature (skip self, **kwargs)
+        try:
+            sig = inspect.signature(method)
+            method_params = {
+                name for name, p in sig.parameters.items()
+                if name not in ("self", "kwargs") and p.kind not in (
+                    inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD
+                )
+            }
+        except (ValueError, TypeError):
+            method_params = set()
+
+        def score(pattern):
+            tokens = {p[1:-1].split(":")[-1] for p in pattern.split("/") if p.startswith("<")}
+            non_mode_tokens = tokens - {"mode"}
+            # Must contain mode when mode_handlers present; match method params excluding mode
+            mode_bonus = 1 if (default_mode and "mode" in tokens) else 0
+            param_match = len(non_mode_tokens & method_params) if method_params else len(non_mode_tokens)
+            return (mode_bonus, param_match)
+
+        return max(url_params, key=score)
+
+    # Convert a Flask URL pattern to an OpenAPI path string
+    def _to_openapi_path(suffix):
+        if suffix:
+            path = f"{base_path}/{suffix}"
+        else:
+            path = base_path
+        return path.replace("<int:", "{").replace("<string:", "{").replace(">", "}")
+
+    # Pre-compute a default path/params for methods that don't override
+    if url_params:
+        default_suffix = max(url_params, key=lambda x: x.count('<'))
+        default_full_path = _to_openapi_path(default_suffix)
+        default_path_params = extract_path_params_from_url([default_suffix])
+    else:
+        default_full_path = base_path
+        default_path_params = []
 
     # Check all classes (API class + mode handlers) for decorated methods
     endpoints_registered = 0
@@ -729,6 +794,15 @@ def register_api_class(
             openapi_meta = getattr(method, "_openapi", None)
             if openapi_meta is None:
                 continue
+
+            # Pick the URL pattern that matches this specific method's signature
+            if url_params:
+                suffix = _pick_url_suffix_for_method(method)
+                full_path = _to_openapi_path(suffix)
+                path_params = extract_path_params_from_url([suffix])
+            else:
+                full_path = default_full_path
+                path_params = default_path_params
 
             # Merge path params with explicit params
             all_params = list(path_params)
