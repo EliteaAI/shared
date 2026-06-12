@@ -1,9 +1,47 @@
 """ Storage retention policy cleanup RPC """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pylon.core.tools import log, web
 
 from ..tools.minio_client import MinioClient
 from ..tools.storage_engines.libcloud import ManualCleanupMixin
+
+CLEANUP_BATCH_SIZE = 1000
+
+
+def _batch_list(items, batch_size):
+    """Yield successive batches from items list."""
+    for i in range(0, len(items), batch_size):
+        yield items[i:i + batch_size]
+
+
+def _process_project(project):
+    """
+    Process cleanup for a single project.
+    Designed to run in a thread pool worker.
+    """
+    project_id = project["id"]
+    project_name = project.get("name", f"project_{project_id}")
+    try:
+        engine = MinioClient(project)
+        bucket_results = engine.cleanup_all_buckets()
+        if bucket_results:
+            files_deleted = sum(bucket_results.values())
+            return {
+                "project_id": project_id,
+                "name": project_name,
+                "buckets_cleaned": len(bucket_results),
+                "files_deleted": files_deleted,
+                "buckets": bucket_results
+            }
+        return None
+    except Exception as e:
+        return {
+            "project_id": project_id,
+            "name": project_name,
+            "error": str(e)
+        }
 
 
 class RPC:
@@ -14,6 +52,9 @@ class RPC:
 
         This RPC is designed to be called by the scheduling plugin to enforce
         retention policies on all buckets across all projects.
+
+        Projects are processed in parallel using ThreadPoolExecutor with batching
+        to prevent resource exhaustion.
 
         Only runs cleanup for storage engines that implement ManualCleanupMixin.
         S3/MinIO handles lifecycle natively at server level.
@@ -41,32 +82,47 @@ class RPC:
             total_files_deleted = 0
             total_buckets_cleaned = 0
 
-            for project in project_list:
-                try:
-                    project_id = project["id"]
-                    project_name = project.get("name", f"project_{project_id}")
-                    engine = MinioClient(project)
-                    bucket_results = engine.cleanup_all_buckets()
+            total_batches = (len(project_list) + CLEANUP_BATCH_SIZE - 1) // CLEANUP_BATCH_SIZE
+            batch_num = 0
 
-                    if bucket_results:
-                        files_deleted = sum(bucket_results.values())
-                        total_files_deleted += files_deleted
-                        total_buckets_cleaned += len(bucket_results)
+            for batch in _batch_list(project_list, CLEANUP_BATCH_SIZE):
+                batch_num += 1
+                log.info(
+                    f"Storage_cleanup: Processing batch {batch_num}/{total_batches} "
+                    f"({len(batch)} projects)"
+                )
 
-                        all_results[f"project_{project_id}"] = {
-                            "name": project_name,
-                            "buckets_cleaned": len(bucket_results),
-                            "files_deleted": files_deleted,
-                            "buckets": bucket_results
-                        }
+                with ThreadPoolExecutor() as executor:
+                    futures = {executor.submit(_process_project, p): p for p in batch}
 
-                except Exception as e:
-                    all_results[f"project_{project.get('id', 'unknown')}"] = {
-                        "error": str(e),
-                        "name": project.get("name", "unknown")
-                    }
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result is None:
+                            continue
 
-            log.debug(
+                        project_id = result["project_id"]
+
+                        if "error" in result:
+                            all_results[f"project_{project_id}"] = {
+                                "error": result["error"],
+                                "name": result["name"]
+                            }
+                        else:
+                            total_files_deleted += result["files_deleted"]
+                            total_buckets_cleaned += result["buckets_cleaned"]
+                            all_results[f"project_{project_id}"] = {
+                                "name": result["name"],
+                                "buckets_cleaned": result["buckets_cleaned"],
+                                "files_deleted": result["files_deleted"],
+                                "buckets": result["buckets"]
+                            }
+
+                log.info(
+                    f"Storage_cleanup: Batch {batch_num}/{total_batches} complete. "
+                    f"Running totals: {total_buckets_cleaned} buckets, {total_files_deleted} files"
+                )
+
+            log.info(
                 f"Storage_cleanup: Complete. "
                 f"Processed {len(project_list)} projects, "
                 f"cleaned {total_buckets_cleaned} buckets, "
