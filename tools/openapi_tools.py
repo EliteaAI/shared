@@ -710,7 +710,7 @@ def register_api_class(
     Args:
         api_class: The API class with @openapi decorated methods
         plugin_name: Plugin name for grouping
-        base_path: Base URL path (e.g., "/api/v1/configurations")
+        base_path: Base URL path (e.g., "/api/v2/configurations")
         registry: OpenAPI registry (defaults to global)
     """
     if registry is None:
