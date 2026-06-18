@@ -49,7 +49,6 @@ class AbstractBaseMixin:
         return json.dumps(self.to_json(), indent=2)
 
     def to_json(self, exclude_fields: tuple = ()) -> dict:
-        log.debug('Be cautious "to_json()". Better write your own serialization for %s', getattr(self, '__tablename__'))
         result = dict()
         for column in self.__table__.columns:
             if column.name not in set(exclude_fields):
