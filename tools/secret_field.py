@@ -108,7 +108,7 @@ class SecretString(SecretStr):
             raise ValueError(
                 'Secret value was not set. If you are still sure to change secret, pass force_set_secret=True'
             )
-        log.debug(f"Storing secret value: {self._secret_value} of {self._secret_repr}")
+        log.debug("Storing secret: %s", self._secret_repr)
 
         # from pylon.core.tools import log
         # hs = self.vault_client.get_secrets()
@@ -151,13 +151,13 @@ class SecretString(SecretStr):
 
 
 def process_field(field_value, vault_client) -> tuple[set, Any]:
-    log.info(f'processing field: {type(field_value)=}, {field_value=}')
+    log.debug("processing field: %s", type(field_value).__name__)
     new_secrets = set()
 
     if type(field_value).__name__ == "SecretStr":
         secret_value = field_value.get_secret_value()
         s = SecretString(secret_value, project_id=vault_client.project_id)
-        log.info(f'found SecretStr {secret_value=}, {s=}, {s._is_secret=}')
+        log.debug("found SecretStr, is_secret=%s", s._is_secret)
         if not s._is_secret:
             s.vault_client = vault_client
             secret_uuid_value = s.store_secret()
@@ -196,7 +196,7 @@ def store_secrets_dict(model_dict: dict, project_id: int, vault_client = None) -
         field_value = model_dict[field_name]
         secrets_update, new_value = process_field(field_value, vault_client)
         if field_value != new_value and new_value is not None:
-            log.info(f'Value to Secrets [{field_name}] {field_value=} -> {new_value}')
+            log.debug("Value to Secrets [%s]", field_name)
             model_dict[field_name] = new_value
             new_secrets.add(new_value)
         new_secrets.update(secrets_update)
@@ -213,7 +213,7 @@ def store_secrets_pd(model: BaseModel, project_id: Optional[int] = None, vault_c
         field_value = getattr(model, field_name)
         secrets_update, new_value = process_field(field_value, vault_client)
         if field_value != new_value and new_value is not None:
-            log.info(f'Value to Secrets [{field_name}] {field_value=} -> {new_value}')
+            log.debug("Value to Secrets [%s]", field_name)
             setattr(model, field_name, new_value)
             new_secrets.add(new_value)
         new_secrets.update(secrets_update)
