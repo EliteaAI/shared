@@ -268,7 +268,7 @@ class OpenAPIRegistry:
             self._endpoints[plugin_name] = []
 
         # Convert Flask URL params to OpenAPI format
-        openapi_path = path.replace("<int:", "{").replace("<string:", "{").replace(">", "}")
+        openapi_path = path.replace("<int:", "{").replace("<string:", "{").replace("<path:", "{").replace(">", "}")
 
         self._endpoints[plugin_name].append({
             "path": openapi_path,
@@ -416,31 +416,35 @@ class OpenAPIRegistry:
             # Request body
             if endpoint["request_body"] and method in ["post", "put", "patch"]:
                 model = endpoint["request_body"]
-                schema_name = model.__name__
-                schema, definitions = pydantic_to_openapi_schema(model)
-                spec["components"]["schemas"][schema_name] = schema
-                # Add all nested definitions to components/schemas
-                spec["components"]["schemas"].update(definitions)
+                if isinstance(model, dict):
+                    # Raw requestBody dict (e.g. multipart/form-data)
+                    operation["requestBody"] = model
+                else:
+                    schema_name = model.__name__
+                    schema, definitions = pydantic_to_openapi_schema(model)
+                    spec["components"]["schemas"][schema_name] = schema
+                    # Add all nested definitions to components/schemas
+                    spec["components"]["schemas"].update(definitions)
 
-                request_body_content = {
-                    "schema": {"$ref": f"#/components/schemas/{schema_name}"}
-                }
-
-                if "examples" in schema:
-                    examples = schema["examples"]
-                    if isinstance(examples, list) and len(examples) > 0:
-                        # OpenAPI 3.0 uses 'examples' (plural) with named examples
-                        request_body_content["examples"] = {
-                            f"example{i+1}": {"value": ex}
-                            for i, ex in enumerate(examples)
-                        }
-
-                operation["requestBody"] = {
-                    "required": True,
-                    "content": {
-                        "application/json": request_body_content
+                    request_body_content = {
+                        "schema": {"$ref": f"#/components/schemas/{schema_name}"}
                     }
-                }
+
+                    if "examples" in schema:
+                        examples = schema["examples"]
+                        if isinstance(examples, list) and len(examples) > 0:
+                            # OpenAPI 3.0 uses 'examples' (plural) with named examples
+                            request_body_content["examples"] = {
+                                f"example{i+1}": {"value": ex}
+                                for i, ex in enumerate(examples)
+                            }
+
+                    operation["requestBody"] = {
+                        "required": True,
+                        "content": {
+                            "application/json": request_body_content
+                        }
+                    }
 
             # Response model
             if endpoint["response_model"]:
@@ -610,12 +614,13 @@ def register_openapi(
     mcp_description: str = "",
     tags: Optional[List[str]] = None,
     parameters: Optional[List[Dict]] = None,
-    request_body: Optional[Type[BaseModel]] = None,
+    request_body=None,
     response_model: Optional[Type[BaseModel]] = None,
     responses: Optional[Dict] = None,
     deprecated: bool = False,
     mcp_tool: bool = False,
     available_to_users: bool = False,
+    path_suffix_override: Optional[str] = None,
 ):
     """
     Decorator to document API methods with OpenAPI metadata.
@@ -646,6 +651,7 @@ def register_openapi(
             "deprecated": deprecated,
             "mcp_tool": mcp_tool,
             "available_to_users": available_to_users,
+            "path_suffix_override": path_suffix_override,
         }
         return func
 
@@ -768,7 +774,7 @@ def register_api_class(
             path = f"{base_path}/{suffix}"
         else:
             path = base_path
-        return path.replace("<int:", "{").replace("<string:", "{").replace(">", "}")
+        return path.replace("<int:", "{").replace("<string:", "{").replace("<path:", "{").replace(">", "}")
 
     # Pre-compute a default path/params for methods that don't override
     if url_params:
@@ -793,7 +799,11 @@ def register_api_class(
                 continue
 
             # Pick the URL pattern that matches this specific method's signature
-            if url_params:
+            if openapi_meta.get("path_suffix_override"):
+                suffix = openapi_meta["path_suffix_override"]
+                full_path = _to_openapi_path(suffix)
+                path_params = extract_path_params_from_url([suffix])
+            elif url_params:
                 suffix = _pick_url_suffix_for_method(method)
                 full_path = _to_openapi_path(suffix)
                 path_params = extract_path_params_from_url([suffix])
