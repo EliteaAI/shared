@@ -414,7 +414,7 @@ class OpenAPIRegistry:
                 operation["security"] = endpoint["security"]
 
             # Request body
-            if endpoint["request_body"] and method in ["post", "put", "patch"]:
+            if endpoint["request_body"] and method in ["post", "put", "patch", "delete"]:
                 model = endpoint["request_body"]
                 if isinstance(model, dict):
                     # Raw requestBody dict (e.g. multipart/form-data)
