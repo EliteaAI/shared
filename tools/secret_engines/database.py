@@ -103,6 +103,37 @@ class Engine(EngineBase):  # pylint: disable=R0902
             data = session.query(SecretsData).get(self.db_key).data
         return json.loads(Fernet(key).decrypt(data).decode())
 
+    def _write_section(self, section, value):
+        # Lock the row before reading it, so concurrent writers to different
+        # sections (secrets vs hidden_secrets) can't clobber each other's update.
+        key = self._read_key()
+        with context.db.make_session() as session:
+            data_obj = (
+                session.query(SecretsData)
+                .filter(SecretsData.id == self.db_key)
+                .with_for_update()
+                .one()
+            )
+            data = json.loads(Fernet(key).decrypt(data_obj.data).decode())
+            data[section] = value
+            data_obj.data = Fernet(key).encrypt(json.dumps(data).encode())
+            #
+            try:
+                session.commit()
+            except:  # pylint: disable=W0702
+                session.rollback()
+                raise
+        #
+        self._cache[section] = value
+
+    def set_secrets(self, secrets, **kwargs):
+        _ = kwargs
+        self._write_section("secrets", secrets)
+
+    def set_hidden_secrets(self, secrets, **kwargs):
+        _ = kwargs
+        self._write_section("hidden_secrets", secrets)
+
     def create_project_space(self, *args, **kwargs):
         _ = args, kwargs
         #
