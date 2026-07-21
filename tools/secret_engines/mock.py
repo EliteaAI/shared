@@ -36,6 +36,24 @@ class Engine(EngineBase):  # pylint: disable=R0902
     def _read(self):
         return Engine.storage[self.secrets_key]
 
+    def update_secrets(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        secrets = self.get_secrets()
+        secrets.update(add or {})
+        for name in (remove or ()):
+            secrets.pop(name, None)
+        self.set_secrets(secrets)
+        return secrets
+
+    def update_hidden_secrets(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        secrets = self.get_hidden_secrets()
+        secrets.update(add or {})
+        for name in (remove or ()):
+            secrets.pop(name, None)
+        self.set_hidden_secrets(secrets)
+        return secrets
+
     def create_project_space(self, *args, **kwargs):
         _ = args, kwargs
         #
