@@ -148,6 +148,12 @@ def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
         param_schema = param.get("schema", {"type": "string"})
         param_description = param.get("description", "")
 
+        # 'mode' is API-mode routing, not a model argument. Hide it from the model so it can't
+        # route to another handler — but only when it has a default the tool executor can fill;
+        # with no default, keep it visible so the model still supplies the required path segment.
+        if param_name == "mode" and param_in == "path" and "default" in param_schema:
+            continue
+
         if param_in in ("path", "query"):
             properties[param_name] = {
                 **param_schema,
@@ -818,12 +824,18 @@ def register_api_class(
                 if not any(p["name"] == param["name"] for p in all_params):
                     all_params.append(param)
 
-            # Set default value for 'mode' parameter if mode_handlers exist
-            if default_mode:
+            # Default the 'mode' path param to the handler this method is actually registered on,
+            # not the first mode_handlers key — otherwise a tool on a non-first handler (e.g.
+            # PromptLibAPI when 'administration' is listed first) defaults to the wrong handler,
+            # which can read params from a different place and silently return the wrong data.
+            handler_mode = next(
+                (k for k, v in mode_handlers.items() if v is check_class), default_mode
+            )
+            if handler_mode:
                 for param in all_params:
                     if param["name"] == "mode" and param["in"] == "path":
-                        param["schema"]["default"] = default_mode
-                        param["description"] = f"Mode (default: {default_mode})"
+                        param["schema"]["default"] = handler_mode
+                        param["description"] = f"Mode (default: {handler_mode})"
                         break
 
             registry.register_endpoint(
