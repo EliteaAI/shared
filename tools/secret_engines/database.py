@@ -134,6 +134,40 @@ class Engine(EngineBase):  # pylint: disable=R0902
         _ = kwargs
         self._write_section("hidden_secrets", secrets)
 
+    def _update_section(self, section, add=None, remove=None):
+        # Lock before reading, so merge is atomic vs same-section concurrent writers.
+        key = self._read_key()
+        with context.db.make_session() as session:
+            data_obj = (
+                session.query(SecretsData)
+                .filter(SecretsData.id == self.db_key)
+                .with_for_update()
+                .one()
+            )
+            data = json.loads(Fernet(key).decrypt(data_obj.data).decode())
+            target = data.setdefault(section, {})
+            target.update(add or {})
+            for name in (remove or ()):
+                target.pop(name, None)
+            data_obj.data = Fernet(key).encrypt(json.dumps(data).encode())
+            #
+            try:
+                session.commit()
+            except:  # pylint: disable=W0702
+                session.rollback()
+                raise
+        #
+        self._cache[section] = target
+        return target
+
+    def update_secrets(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        return self._update_section("secrets", add, remove)
+
+    def update_hidden_secrets(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        return self._update_section("hidden_secrets", add, remove)
+
     def create_project_space(self, *args, **kwargs):
         _ = args, kwargs
         #
