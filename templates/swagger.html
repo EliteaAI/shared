@@ -65,6 +65,29 @@
         .elitea-json-link:hover {
             background: rgba(73, 204, 144, 0.2);
         }
+        button.elitea-json-link {
+            cursor: pointer;
+            font: inherit;
+        }
+        .elitea-search {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: sans-serif;
+            width: 220px;
+            outline: none;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .elitea-search::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+        .elitea-search:focus {
+            border-color: #49cc90;
+            background: rgba(255, 255, 255, 0.12);
+        }
     </style>
 </head>
 <body>
@@ -75,6 +98,9 @@
             <span class="elitea-header-subtitle">API Documentation</span>
         </div>
         <div class="elitea-header-actions">
+            <input type="text" id="elitea-endpoint-search" class="elitea-search" placeholder="Search endpoints…" autocomplete="off" />
+            <button type="button" id="elitea-collapse-all" class="elitea-json-link">Collapse All</button>
+            <button type="button" id="elitea-expand-all" class="elitea-json-link">Expand All</button>
             <a href="{{ spec_url }}" class="elitea-json-link" target="_blank">OpenAPI JSON</a>
         </div>
     </header>
@@ -100,11 +126,77 @@
                 defaultModelsExpandDepth: 1,
                 defaultModelExpandDepth: 1,
                 docExpansion: "list",
-                filter: true,
+                filter: false,
                 showExtensions: true,
                 showCommonExtensions: true
             });
+
+            setupEliteaControls();
         };
+
+        function setupEliteaControls() {
+            const root = document.getElementById('swagger-ui');
+
+            function setTagExpanded(tagSection, expanded) {
+                const control = tagSection.querySelector('.opblock-tag');
+                if (!control) return;
+                const isOpen = control.getAttribute('data-is-open') === 'true'
+                    || tagSection.querySelector('.operation-tag-content') !== null;
+                if (isOpen !== expanded) {
+                    control.click();
+                }
+            }
+
+            function setAll(expanded) {
+                document.querySelectorAll('#swagger-ui .opblock-tag-section').forEach(function(section) {
+                    setTagExpanded(section, expanded);
+                });
+            }
+
+            const collapseBtn = document.getElementById('elitea-collapse-all');
+            const expandBtn = document.getElementById('elitea-expand-all');
+            if (collapseBtn) collapseBtn.addEventListener('click', function() { setAll(false); });
+            if (expandBtn) expandBtn.addEventListener('click', function() { setAll(true); });
+
+            const searchInput = document.getElementById('elitea-endpoint-search');
+            let debounce;
+
+            function applyFilter() {
+                const q = searchInput.value.trim().toLowerCase();
+                document.querySelectorAll('#swagger-ui .opblock-tag-section').forEach(function(section) {
+                    let visibleCount = 0;
+                    section.querySelectorAll('.opblock').forEach(function(op) {
+                        if (!q) {
+                            op.style.display = '';
+                            visibleCount++;
+                            return;
+                        }
+                        const path = (op.querySelector('.opblock-summary-path') || {}).innerText || '';
+                        const method = (op.querySelector('.opblock-summary-method') || {}).innerText || '';
+                        const desc = (op.querySelector('.opblock-summary-description') || {}).innerText || '';
+                        const hay = (path + ' ' + method + ' ' + desc).toLowerCase();
+                        const match = hay.indexOf(q) !== -1;
+                        op.style.display = match ? '' : 'none';
+                        if (match) visibleCount++;
+                    });
+                    section.style.display = (q && visibleCount === 0) ? 'none' : '';
+                });
+            }
+
+            if (searchInput) {
+                searchInput.addEventListener('input', function() {
+                    clearTimeout(debounce);
+                    debounce = setTimeout(applyFilter, 150);
+                });
+            }
+
+            if (root && searchInput) {
+                const observer = new MutationObserver(function() {
+                    if (searchInput.value.trim()) applyFilter();
+                });
+                observer.observe(root, { childList: true, subtree: true });
+            }
+        }
     </script>
 </body>
 </html>
