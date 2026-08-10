@@ -3,6 +3,8 @@ import datetime
 
 from pylon.core.tools import log  # pylint: disable=E0401,E0611
 
+from . import lifecycle_from_meta
+
 CLEANUP_FILE_BATCH_SIZE = 1000
 MAX_RETENTION_DAYS = 36500  # ~100 years, sanity limit
 
@@ -33,13 +35,17 @@ class ManualCleanupMixin:
                 log.error(f"Failed to delete file {file_name}: {e}")
         return removed
 
-    def cleanup_expired_files(self, bucket):
+    def cleanup_expired_files(self, bucket, meta=None):
         """
         Clean up expired files from a bucket using pagination and bulk delete.
+        Pass a prefetched `meta` dict to skip the per-bucket meta lookup.
         """
         bucket_name = self.format_bucket_name(bucket)
         try:
-            lifecycle = self.get_bucket_lifecycle(bucket)
+            if meta is not None:
+                lifecycle = lifecycle_from_meta(meta)
+            else:
+                lifecycle = self.get_bucket_lifecycle(bucket)
             if not lifecycle or "Rules" not in lifecycle:
                 return 0
 
@@ -93,13 +99,16 @@ class ManualCleanupMixin:
             log.error(f"Failed to cleanup expired files for bucket={bucket_name}: {e}", exc_info=True)
             return 0
 
-    def cleanup_all_buckets(self):
+    def cleanup_all_buckets(self, buckets=None, metas=None):
+        """Pass prefetched `buckets`/`metas` to skip this call's own walk/meta-query."""
         results = {}
         try:
-            buckets = self.list_bucket()
+            if buckets is None:
+                buckets = self.list_bucket()
             for bucket in buckets:
                 try:
-                    deleted = self.cleanup_expired_files(bucket)
+                    meta = metas.get(bucket) if metas is not None else None
+                    deleted = self.cleanup_expired_files(bucket, meta=meta)
                     if deleted > 0:
                         results[bucket] = deleted
                 except Exception as e:

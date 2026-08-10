@@ -36,7 +36,7 @@ from tools import config as c  # pylint: disable=E0401
 from .. import db
 from ..minio_tools import space_monitor, throughput_monitor  # pylint: disable=E0401
 from ...models.storage import StorageMeta
-from . import fs_encode_name, fs_decode_name
+from . import fs_encode_name, fs_decode_name, lifecycle_from_meta
 from .storage_mixin import ManualCleanupMixin
 
 
@@ -44,7 +44,7 @@ class EngineMeta(type):
     """ Engine meta class """
 
     def __getattr__(cls, name):
-        log.info("StorageEngine.cls.__getattr__(%s)", name)
+        log.debug("StorageEngine.cls.__getattr__(%s)", name)
 
 
 class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
@@ -54,7 +54,7 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         return name[len(self.bucket_prefix):] if name.startswith(self.bucket_prefix) else name
 
     def __getattr__(self, name):
-        log.info("StorageEngine.base.__getattr__(%s)", name)
+        log.debug("StorageEngine.base.__getattr__(%s)", name)
 
     TASKS_BUCKET = "tasks"
 
@@ -187,6 +187,53 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
             #
             if name.startswith(self.bucket_prefix):
                 result.append(name.replace(self.bucket_prefix, "", 1))
+        #
+        return result
+
+    def list_all_buckets_by_project(self):
+        """Batch path lives here only: filesystem.EngineBase has no ManualCleanupMixin to batch for."""
+        result = {}
+        #
+        for item in self.driver.iterate_containers():
+            try:
+                name = fs_decode_name(
+                    name=item.name,
+                    kind="bucket",
+                    encoder=self.storage_libcloud_encoder,
+                )
+            except:  # pylint: disable=W0702
+                continue
+            #
+            if not name.startswith("p--"):
+                continue
+            #
+            project_id, sep, bucket = name[len("p--"):].partition(".")
+            if not sep:
+                continue
+            #
+            result.setdefault(project_id, []).append(bucket)
+        #
+        return result
+
+    def load_metas(self, buckets):
+        """One IN query instead of one session per bucket. Missing buckets map to {}, same as _load_meta."""
+        encoded_to_bucket = {
+            fs_encode_name(
+                name=self.format_bucket_name(bucket),
+                kind="meta",
+                encoder=self.storage_libcloud_encoder,
+            ): bucket
+            for bucket in buckets
+        }
+        #
+        result = {bucket: {} for bucket in buckets}
+        encoded_ids = list(encoded_to_bucket)
+        #
+        with context.db.make_session() as session:
+            for i in range(0, len(encoded_ids), 1000):
+                chunk = encoded_ids[i:i + 1000]
+                for meta_obj in session.query(StorageMeta).filter(StorageMeta.id.in_(chunk)):
+                    result[encoded_to_bucket[meta_obj.id]] = meta_obj.data
         #
         return result
 
@@ -339,18 +386,7 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         self._save_meta(bucket, meta)
 
     def get_bucket_lifecycle(self, bucket):
-        meta = self._load_meta(bucket)
-        #
-        if not meta or "lifecycle" not in meta:
-            return {}
-        #
-        return {
-            "Rules": [{
-                "Expiration": {
-                    "Days": meta["lifecycle"],
-                },
-            }],
-        }
+        return lifecycle_from_meta(self._load_meta(bucket))
 
     def get_bucket_size(self, bucket):
         total_size = 0

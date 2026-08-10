@@ -48,3 +48,17 @@ def fs_decode_name(name, kind=None, encoder=None):
                 return name.replace("-", ".", 2).replace("p.", "p--", 1)
     #
     return name
+
+
+def lifecycle_from_meta(meta):
+    """ Days-extraction shared by get_bucket_lifecycle and the batched meta path """
+    if not meta or "lifecycle" not in meta:
+        return {}
+    #
+    return {
+        "Rules": [{
+            "Expiration": {
+                "Days": meta["lifecycle"],
+            },
+        }],
+    }

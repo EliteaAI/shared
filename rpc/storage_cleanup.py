@@ -16,16 +16,18 @@ def _batch_list(items, batch_size):
         yield items[i:i + batch_size]
 
 
-def _process_project(project):
+def _process_project(project, buckets=None):
     """
     Process cleanup for a single project.
     Designed to run in a thread pool worker.
+    `buckets`, if given, comes from a single precomputed global walk instead of a per-project one.
     """
     project_id = project["id"]
     project_name = project.get("name", f"project_{project_id}")
     try:
         engine = MinioClient(project)
-        bucket_results = engine.cleanup_all_buckets()
+        metas = engine.load_metas(buckets) if buckets is not None and hasattr(engine, "load_metas") else None
+        bucket_results = engine.cleanup_all_buckets(buckets=buckets, metas=metas)
         if bucket_results:
             files_deleted = sum(bucket_results.values())
             return {
@@ -63,8 +65,26 @@ class RPC:
             dict: Cleanup results with statistics per project
         """
         try:
+            # Walk once and share the listing with both the notifier and the deleter below,
+            # instead of each re-walking storage per project. Only engines that support the
+            # batch path (currently libcloud) get this; others keep their own per-call walk.
+            buckets_by_project = None
+            project_list = None
+            if hasattr(MinioClient, "list_all_buckets_by_project"):
+                try:
+                    project_list = self.context.rpc_manager.timeout(30).project_list(
+                        filter_={"create_success": True}
+                    )
+                    if project_list:
+                        buckets_by_project = MinioClient(project_list[0]).list_all_buckets_by_project()
+                except Exception as e:
+                    log.warning('Failed to precompute global bucket listing: %s', e)
+                    buckets_by_project = None
+
             try:
-                self.context.rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
+                self.context.rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
+                    buckets_by_project=buckets_by_project
+                )
             except Exception as e:
                 log.warning('Failed to run bucket expiration notifications: %s', e)
 
@@ -74,9 +94,10 @@ class RPC:
                     "reason": "Storage engine handles lifecycle natively"
                 }
 
-            project_list = self.context.rpc_manager.timeout(30).project_list(
-                filter_={"create_success": True}
-            )
+            if project_list is None:
+                project_list = self.context.rpc_manager.timeout(30).project_list(
+                    filter_={"create_success": True}
+                )
 
             all_results = {}
             total_files_deleted = 0
@@ -93,7 +114,13 @@ class RPC:
                 )
 
                 with ThreadPoolExecutor() as executor:
-                    futures = {executor.submit(_process_project, p): p for p in batch}
+                    futures = {
+                        executor.submit(
+                            _process_project, p,
+                            buckets_by_project.get(str(p["id"]), []) if buckets_by_project is not None else None
+                        ): p
+                        for p in batch
+                    }
 
                     for future in as_completed(futures):
                         result = future.result()
