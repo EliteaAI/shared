@@ -146,3 +146,28 @@ def test_get_bucket_lifecycle_matches_lifecycle_from_meta_batch_path(monkeypatch
     via_batch = libcloud_engine.lifecycle_from_meta(engine.load_metas(["bucket-a"])["bucket-a"])
 
     assert via_single == via_batch == {"Rules": [{"Expiration": {"Days": 14}}]}
+
+
+def test_prefix_builder_and_splitter_round_trip():
+    """Review fix: list_all_buckets_by_project() parses via split_project_bucket_name() rather
+    than its own partition(), so both directions of the p--{id}. convention stay in step.
+    Multi-dot bucket names must survive the round trip."""
+    for project_id, bucket in (("7", "logs"), ("7", "foo.bar.baz"), ("12905", "a.b")):
+        name = libcloud_engine.EngineBase.project_bucket_prefix(project_id) + bucket
+        assert libcloud_engine.EngineBase.split_project_bucket_name(name) == (project_id, bucket)
+
+
+def test_splitter_rejects_non_project_and_malformed_names():
+    split = libcloud_engine.EngineBase.split_project_bucket_name
+    assert split("not-a-project-bucket") is None
+    assert split("p--7") is None       # no separator
+    assert split("p--.logs") is None   # no project id
+
+
+def test_list_all_buckets_by_project_keeps_multi_dot_bucket_names(monkeypatch):
+    context = FakeContext()
+    monkeypatch.setattr(libcloud_engine, "context", context)
+    driver = FakeDriver(container_names=["p--4.foo.bar"])
+    engine = _make_engine(4, driver=driver, encoder=None, context=context)
+
+    assert engine.list_all_buckets_by_project() == {"4": ["foo.bar"]}

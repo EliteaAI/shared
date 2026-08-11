@@ -8,21 +8,13 @@ that runs these tests) and the db/model/tool dependency chain. The pure
 `storage_mixin.py` are loaded as real modules so the highest-risk logic
 (encoding round-trips, lifecycle extraction) runs as actually written.
 """
-import importlib.util
 import sys
 import types
 from pathlib import Path
 
+from ._module_loader import load_file_as_module as _load_file_as_module
+
 SHARED_ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-def _load_file_as_module(name, path, package):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = package
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _install_fake_libcloud():

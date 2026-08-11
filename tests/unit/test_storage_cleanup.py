@@ -142,7 +142,8 @@ def test_single_global_walk_shared_between_notifier_and_deleter(monkeypatch):
     notifier_calls = []
 
     class _TimeoutRpc(_FakeTimeoutRpc):
-        def artifacts_check_bucket_expiration_notifications(self, buckets_by_project=None):
+        def artifacts_check_bucket_expiration_notifications(
+                self, buckets_by_project=None, project_ids=None):
             notifier_calls.append(buckets_by_project)
 
     class _RpcManager(_FakeRpcManager):
@@ -164,3 +165,87 @@ def test_single_global_walk_shared_between_notifier_and_deleter(monkeypatch):
     assert calls == ["walk"]
     assert notifier_calls == [{"1": ["b1"], "2": ["b2"]}]
     assert sorted(process_calls) == [(1, ["b1"]), (2, ["b2"])]
+
+
+def test_per_project_storage_config_skips_global_walk(monkeypatch):
+    """Review fix: with always_use_shared_storage=False a project can sit on a different
+    backend, so one walk can't speak for all projects -- fall back to per-project walks
+    rather than silently reporting zero buckets for the divergent project."""
+    calls = []
+
+    class _Engine(storage_cleanup.ManualCleanupMixin):
+        def __init__(self, project):
+            self.project = project
+
+        def list_all_buckets_by_project(self):
+            calls.append("walk")
+            return {"1": ["b1"]}
+
+    monkeypatch.setattr(storage_cleanup, "MinioClient", _Engine)
+    monkeypatch.setattr(
+        storage_cleanup.this, "descriptor",
+        type("D", (), {"config": {"always_use_shared_storage": False}})(),
+    )
+
+    notified = []
+    process_calls = []
+
+    class _TimeoutRpc(_FakeTimeoutRpc):
+        def artifacts_check_bucket_expiration_notifications(
+                self, buckets_by_project=None, project_ids=None):
+            notified.append(buckets_by_project)
+
+    class _RpcManager(_FakeRpcManager):
+        def timeout(self, _seconds):
+            return _TimeoutRpc(self._project_list)
+
+    monkeypatch.setattr(
+        storage_cleanup, "_process_project",
+        lambda p, buckets=None: process_calls.append((p["id"], buckets)),
+    )
+
+    projects = [{"id": 1, "name": "p1"}]
+    rpc = storage_cleanup.RPC()
+    rpc.context = _FakeContext(projects)
+    rpc.context.rpc_manager = _RpcManager(projects)
+    rpc.storage_cleanup()
+
+    assert calls == []                      # no global walk taken
+    assert notified == [None]               # notifier walks per project itself
+    assert process_calls == [(1, None)]     # deleter walks per project itself
+
+
+def test_notifier_payload_is_chunked_not_one_global_map(monkeypatch):
+    """Review fix: the whole-deployment bucket map must not cross the RPC boundary in one
+    argument, or the latency just moves into serialization/transport."""
+    monkeypatch.setattr(storage_cleanup, "NOTIFY_BATCH_SIZE", 2)
+
+    class _Engine(storage_cleanup.ManualCleanupMixin):
+        def __init__(self, project):
+            self.project = project
+
+        def list_all_buckets_by_project(self):
+            return {str(i): [f"b{i}"] for i in range(5)}
+
+    monkeypatch.setattr(storage_cleanup, "MinioClient", _Engine)
+    monkeypatch.setattr(storage_cleanup, "_process_project", lambda p, buckets=None: None)
+
+    seen = []
+
+    class _TimeoutRpc(_FakeTimeoutRpc):
+        def artifacts_check_bucket_expiration_notifications(
+                self, buckets_by_project=None, project_ids=None):
+            seen.append((sorted(buckets_by_project), sorted(project_ids)))
+
+    class _RpcManager(_FakeRpcManager):
+        def timeout(self, _seconds):
+            return _TimeoutRpc(self._project_list)
+
+    projects = _projects(5)
+    rpc = storage_cleanup.RPC()
+    rpc.context = _FakeContext(projects)
+    rpc.context.rpc_manager = _RpcManager(projects)
+    rpc.storage_cleanup()
+
+    assert [len(ids) for _, ids in seen] == [2, 2, 1]
+    assert sorted(pid for _, ids in seen for pid in ids) == ["0", "1", "2", "3", "4"]

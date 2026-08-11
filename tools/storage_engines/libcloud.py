@@ -50,8 +50,28 @@ class EngineMeta(type):
 class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
     """ Engine base class """
 
+    PROJECT_PREFIX = "p--"
+    PROJECT_PREFIX_SEP = "."
+
     def purify_bucket_name(self, name: str) -> str:
         return name[len(self.bucket_prefix):] if name.startswith(self.bucket_prefix) else name
+
+    @classmethod
+    def project_bucket_prefix(cls, project_id) -> str:
+        return f"{cls.PROJECT_PREFIX}{project_id}{cls.PROJECT_PREFIX_SEP}"
+
+    @classmethod
+    def split_project_bucket_name(cls, name: str):
+        """Inverse of project_bucket_prefix: 'p--7.foo.bar' -> ('7', 'foo.bar'), else None.
+        Kept beside the prefix builder so both sides of the convention change together."""
+        if not name.startswith(cls.PROJECT_PREFIX):
+            return None
+        #
+        project_id, sep, bucket = name[len(cls.PROJECT_PREFIX):].partition(cls.PROJECT_PREFIX_SEP)
+        if not sep or not project_id:
+            return None
+        #
+        return project_id, bucket
 
     def __getattr__(self, name):
         log.debug("StorageEngine.base.__getattr__(%s)", name)
@@ -204,13 +224,11 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
             except:  # pylint: disable=W0702
                 continue
             #
-            if not name.startswith("p--"):
+            parsed = self.split_project_bucket_name(name)
+            if parsed is None:
                 continue
             #
-            project_id, sep, bucket = name[len("p--"):].partition(".")
-            if not sep:
-                continue
-            #
+            project_id, bucket = parsed
             result.setdefault(project_id, []).append(bucket)
         #
         return result
@@ -586,7 +604,7 @@ class Engine(EngineBase):
 
     @property
     def bucket_prefix(self):
-        return f"p--{self.project['id']}."
+        return self.project_bucket_prefix(self.project['id'])
 
     @classmethod
     def from_project_id(

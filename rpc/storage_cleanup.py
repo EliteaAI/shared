@@ -4,16 +4,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pylon.core.tools import log, web
 
+from tools import this
+
 from ..tools.minio_client import MinioClient
 from ..tools.storage_engines.libcloud import ManualCleanupMixin
 
 CLEANUP_BATCH_SIZE = 1000
+NOTIFY_BATCH_SIZE = 200
 
 
 def _batch_list(items, batch_size):
     """Yield successive batches from items list."""
     for i in range(0, len(items), batch_size):
         yield items[i:i + batch_size]
+
+
+def _shared_storage_confirmed():
+    """One global walk only covers every project when they all share one storage backend.
+    With per-project storage configs the walk would silently miss projects on other backends."""
+    try:
+        return bool(this.descriptor.config.get("always_use_shared_storage", True))
+    except Exception as e:  # pylint: disable=W0703
+        log.warning('Could not resolve always_use_shared_storage, skipping batch walk: %s', e)
+        return False
 
 
 def _process_project(project, buckets=None):
@@ -46,6 +59,29 @@ def _process_project(project, buckets=None):
         }
 
 
+def _notify_bucket_expiration(rpc_manager, buckets_by_project, project_list):
+    """Send the precomputed listing in project-sized chunks: a whole-deployment bucket map
+    in one RPC argument would just move the latency into serialization/transport."""
+    if buckets_by_project is None or not project_list:
+        try:
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
+                buckets_by_project=buckets_by_project
+            )
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
+        return
+    #
+    for batch in _batch_list(project_list, NOTIFY_BATCH_SIZE):
+        project_ids = [str(p["id"]) for p in batch]
+        chunk = {pid: buckets_by_project.get(pid, []) for pid in project_ids}
+        try:
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
+                buckets_by_project=chunk, project_ids=project_ids
+            )
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
+
+
 class RPC:
     @web.rpc("shared_storage_cleanup")
     def storage_cleanup(self):
@@ -70,7 +106,7 @@ class RPC:
             # batch path (currently libcloud) get this; others keep their own per-call walk.
             buckets_by_project = None
             project_list = None
-            if hasattr(MinioClient, "list_all_buckets_by_project"):
+            if hasattr(MinioClient, "list_all_buckets_by_project") and _shared_storage_confirmed():
                 try:
                     project_list = self.context.rpc_manager.timeout(30).project_list(
                         filter_={"create_success": True}
@@ -81,12 +117,9 @@ class RPC:
                     log.warning('Failed to precompute global bucket listing: %s', e)
                     buckets_by_project = None
 
-            try:
-                self.context.rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
-                    buckets_by_project=buckets_by_project
-                )
-            except Exception as e:
-                log.warning('Failed to run bucket expiration notifications: %s', e)
+            _notify_bucket_expiration(
+                self.context.rpc_manager, buckets_by_project, project_list
+            )
 
             if not issubclass(MinioClient, ManualCleanupMixin):
                 return {

@@ -4,21 +4,13 @@ in shared/__init__.py (needs pylon.core.tools.module.ModuleModel) or the
 minio_client/libcloud dependency chain (boto3/apache-libcloud, not installed
 on the bare host Python that runs these tests).
 """
-import importlib.util
 import sys
 import types
 from pathlib import Path
 
+from ._module_loader import load_file_as_module as _load_file_as_module
+
 SHARED_ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-def _load_file_as_module(name, path, package):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = package
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def load_storage_cleanup():
@@ -57,6 +49,13 @@ def load_storage_cleanup():
 
     fake_libcloud.ManualCleanupMixin = ManualCleanupMixin
     sys.modules["shared.tools.storage_engines.libcloud"] = fake_libcloud
+
+    # `this.descriptor.config` gates the batch walk; default to shared storage as in prod.
+    tools_stub = sys.modules.get("tools") or types.ModuleType("tools")
+    tools_stub.this = types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config={"always_use_shared_storage": True})
+    )
+    sys.modules["tools"] = tools_stub
 
     return _load_file_as_module(
         "shared.rpc.storage_cleanup", SHARED_ROOT / "rpc" / "storage_cleanup.py",
