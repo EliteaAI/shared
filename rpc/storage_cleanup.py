@@ -62,21 +62,30 @@ def _process_project(project, buckets=None):
 def _notify_bucket_expiration(rpc_manager, buckets_by_project, project_list):
     """Send the precomputed listing in project-sized chunks: a whole-deployment bucket map
     in one RPC argument would just move the latency into serialization/transport."""
-    if buckets_by_project is None or not project_list:
+    if buckets_by_project is None:
+        # No precomputed listing: the notifier walks storage per project itself.
         try:
-            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
-                buckets_by_project=buckets_by_project
-            )
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
+        return
+    #
+    if not project_list:
+        # A listing without the projects it was built from can't be chunked, and sending it
+        # whole is the unbounded payload we're avoiding -- drop to the per-project walk.
+        log.warning('Precomputed bucket listing without a project list, ignoring it')
+        try:
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
         except Exception as e:  # pylint: disable=W0703
             log.warning('Failed to run bucket expiration notifications: %s', e)
         return
     #
     for batch in _batch_list(project_list, NOTIFY_BATCH_SIZE):
-        project_ids = [str(p["id"]) for p in batch]
-        chunk = {pid: buckets_by_project.get(pid, []) for pid in project_ids}
+        chunk = {str(p["id"]): buckets_by_project.get(str(p["id"]), []) for p in batch}
         try:
+            # Pass our own project dicts so the callee doesn't re-fetch the full project table per chunk.
             rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
-                buckets_by_project=chunk, project_ids=project_ids
+                buckets_by_project=chunk, projects=batch
             )
         except Exception as e:  # pylint: disable=W0703
             log.warning('Failed to run bucket expiration notifications: %s', e)

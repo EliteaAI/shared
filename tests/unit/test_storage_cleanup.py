@@ -14,7 +14,7 @@ class _FakeTimeoutRpc:
     def __init__(self, project_list):
         self._project_list = project_list
 
-    def artifacts_check_bucket_expiration_notifications(self, buckets_by_project=None):
+    def artifacts_check_bucket_expiration_notifications(self, buckets_by_project=None, projects=None):
         return None
 
     def project_list(self, filter_=None):  # pylint: disable=unused-argument
@@ -143,7 +143,7 @@ def test_single_global_walk_shared_between_notifier_and_deleter(monkeypatch):
 
     class _TimeoutRpc(_FakeTimeoutRpc):
         def artifacts_check_bucket_expiration_notifications(
-                self, buckets_by_project=None, project_ids=None):
+                self, buckets_by_project=None, projects=None):
             notifier_calls.append(buckets_by_project)
 
     class _RpcManager(_FakeRpcManager):
@@ -192,7 +192,7 @@ def test_per_project_storage_config_skips_global_walk(monkeypatch):
 
     class _TimeoutRpc(_FakeTimeoutRpc):
         def artifacts_check_bucket_expiration_notifications(
-                self, buckets_by_project=None, project_ids=None):
+                self, buckets_by_project=None, projects=None):
             notified.append(buckets_by_project)
 
     class _RpcManager(_FakeRpcManager):
@@ -234,8 +234,8 @@ def test_notifier_payload_is_chunked_not_one_global_map(monkeypatch):
 
     class _TimeoutRpc(_FakeTimeoutRpc):
         def artifacts_check_bucket_expiration_notifications(
-                self, buckets_by_project=None, project_ids=None):
-            seen.append((sorted(buckets_by_project), sorted(project_ids)))
+                self, buckets_by_project=None, projects=None):
+            seen.append((sorted(buckets_by_project), sorted(str(p['id']) for p in projects)))
 
     class _RpcManager(_FakeRpcManager):
         def timeout(self, _seconds):
@@ -249,3 +249,65 @@ def test_notifier_payload_is_chunked_not_one_global_map(monkeypatch):
 
     assert [len(ids) for _, ids in seen] == [2, 2, 1]
     assert sorted(pid for _, ids in seen for pid in ids) == ["0", "1", "2", "3", "4"]
+    # each chunk's bucket map covers exactly that chunk's projects, nothing wider
+    for buckets, ids in seen:
+        assert buckets == ids
+
+
+def test_chunked_calls_pass_project_dicts_so_callee_need_not_refetch(monkeypatch):
+    """Review fix: the notifier used to re-fetch the whole project table on every chunk just to
+    discard everything outside it -- N/200 full scans per run. We hand it our own already-fetched
+    project dicts instead."""
+    monkeypatch.setattr(storage_cleanup, "NOTIFY_BATCH_SIZE", 2)
+
+    class _Engine(storage_cleanup.ManualCleanupMixin):
+        def __init__(self, project):
+            self.project = project
+
+        def list_all_buckets_by_project(self):
+            return {str(i): [f"b{i}"] for i in range(3)}
+
+    monkeypatch.setattr(storage_cleanup, "MinioClient", _Engine)
+    monkeypatch.setattr(storage_cleanup, "_process_project", lambda p, buckets=None: None)
+
+    passed = []
+
+    class _TimeoutRpc(_FakeTimeoutRpc):
+        def artifacts_check_bucket_expiration_notifications(
+                self, buckets_by_project=None, projects=None):
+            passed.append(projects)
+
+    class _RpcManager(_FakeRpcManager):
+        def timeout(self, _seconds):
+            return _TimeoutRpc(self._project_list)
+
+    projects = _projects(3)
+    rpc = storage_cleanup.RPC()
+    rpc.context = _FakeContext(projects)
+    rpc.context.rpc_manager = _RpcManager(projects)
+    rpc.storage_cleanup()
+
+    # real project dicts, chunked, in order -- not None and not the full list every time
+    assert passed == [projects[0:2], projects[2:3]]
+
+
+def test_listing_without_project_list_never_sent_whole(monkeypatch):
+    """Review fix: the unchunked branch must not be reachable with a populated listing. Called
+    directly without the project list that listing was built from, the helper drops the listing
+    rather than silently shipping a whole-deployment map in one RPC argument."""
+    sent = []
+
+    class _TimeoutRpc:
+        def artifacts_check_bucket_expiration_notifications(
+                self, buckets_by_project=None, projects=None):
+            sent.append((buckets_by_project, projects))
+
+    class _RpcManager:
+        def timeout(self, _seconds):
+            return _TimeoutRpc()
+
+    storage_cleanup._notify_bucket_expiration(
+        _RpcManager(), {str(i): [f"b{i}"] for i in range(500)}, [],
+    )
+
+    assert sent == [(None, None)]
