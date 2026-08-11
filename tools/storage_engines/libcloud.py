@@ -36,7 +36,7 @@ from tools import config as c  # pylint: disable=E0401
 from .. import db
 from ..minio_tools import space_monitor, throughput_monitor  # pylint: disable=E0401
 from ...models.storage import StorageMeta
-from . import fs_encode_name, fs_decode_name
+from . import fs_encode_name, fs_decode_name, lifecycle_from_meta
 from .storage_mixin import ManualCleanupMixin
 
 
@@ -44,17 +44,37 @@ class EngineMeta(type):
     """ Engine meta class """
 
     def __getattr__(cls, name):
-        log.info("StorageEngine.cls.__getattr__(%s)", name)
+        log.debug("StorageEngine.cls.__getattr__(%s)", name)
 
 
 class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
     """ Engine base class """
 
+    PROJECT_PREFIX = "p--"
+    PROJECT_PREFIX_SEP = "."
+
     def purify_bucket_name(self, name: str) -> str:
         return name[len(self.bucket_prefix):] if name.startswith(self.bucket_prefix) else name
 
+    @classmethod
+    def project_bucket_prefix(cls, project_id) -> str:
+        return f"{cls.PROJECT_PREFIX}{project_id}{cls.PROJECT_PREFIX_SEP}"
+
+    @classmethod
+    def split_project_bucket_name(cls, name: str):
+        """Inverse of project_bucket_prefix: 'p--7.foo.bar' -> ('7', 'foo.bar'), else None.
+        Kept beside the prefix builder so both sides of the convention change together."""
+        if not name.startswith(cls.PROJECT_PREFIX):
+            return None
+        #
+        project_id, sep, bucket = name[len(cls.PROJECT_PREFIX):].partition(cls.PROJECT_PREFIX_SEP)
+        if not sep or not project_id:
+            return None
+        #
+        return project_id, bucket
+
     def __getattr__(self, name):
-        log.info("StorageEngine.base.__getattr__(%s)", name)
+        log.debug("StorageEngine.base.__getattr__(%s)", name)
 
     TASKS_BUCKET = "tasks"
 
@@ -187,6 +207,51 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
             #
             if name.startswith(self.bucket_prefix):
                 result.append(name.replace(self.bucket_prefix, "", 1))
+        #
+        return result
+
+    def list_all_buckets_by_project(self):
+        """Batch path lives here only: filesystem.EngineBase has no ManualCleanupMixin to batch for."""
+        result = {}
+        #
+        for item in self.driver.iterate_containers():
+            try:
+                name = fs_decode_name(
+                    name=item.name,
+                    kind="bucket",
+                    encoder=self.storage_libcloud_encoder,
+                )
+            except:  # pylint: disable=W0702
+                continue
+            #
+            parsed = self.split_project_bucket_name(name)
+            if parsed is None:
+                continue
+            #
+            project_id, bucket = parsed
+            result.setdefault(project_id, []).append(bucket)
+        #
+        return result
+
+    def load_metas(self, buckets):
+        """One IN query instead of one session per bucket. Missing buckets map to {}, same as _load_meta."""
+        encoded_to_bucket = {
+            fs_encode_name(
+                name=self.format_bucket_name(bucket),
+                kind="meta",
+                encoder=self.storage_libcloud_encoder,
+            ): bucket
+            for bucket in buckets
+        }
+        #
+        result = {bucket: {} for bucket in buckets}
+        encoded_ids = list(encoded_to_bucket)
+        #
+        with context.db.make_session() as session:
+            for i in range(0, len(encoded_ids), 1000):
+                chunk = encoded_ids[i:i + 1000]
+                for meta_obj in session.query(StorageMeta).filter(StorageMeta.id.in_(chunk)):
+                    result[encoded_to_bucket[meta_obj.id]] = meta_obj.data
         #
         return result
 
@@ -339,18 +404,7 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         self._save_meta(bucket, meta)
 
     def get_bucket_lifecycle(self, bucket):
-        meta = self._load_meta(bucket)
-        #
-        if not meta or "lifecycle" not in meta:
-            return {}
-        #
-        return {
-            "Rules": [{
-                "Expiration": {
-                    "Days": meta["lifecycle"],
-                },
-            }],
-        }
+        return lifecycle_from_meta(self._load_meta(bucket))
 
     def get_bucket_size(self, bucket):
         total_size = 0
@@ -550,7 +604,7 @@ class Engine(EngineBase):
 
     @property
     def bucket_prefix(self):
-        return f"p--{self.project['id']}."
+        return self.project_bucket_prefix(self.project['id'])
 
     @classmethod
     def from_project_id(

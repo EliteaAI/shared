@@ -197,6 +197,9 @@ class Module(module.ModuleModel):
         from .tools import data_tools
         self.descriptor.register_tool('data_tools', data_tools)
 
+        from .tools.storage_engines import lifecycle_from_meta
+        self.descriptor.register_tool('lifecycle_from_meta', lifecycle_from_meta)
+
         from .tools.flow_tools import FlowNodes
         self.descriptor.register_tool('flow_tools', FlowNodes(self))
 

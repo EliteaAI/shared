@@ -4,10 +4,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pylon.core.tools import log, web
 
+from tools import this
+
 from ..tools.minio_client import MinioClient
 from ..tools.storage_engines.libcloud import ManualCleanupMixin
 
 CLEANUP_BATCH_SIZE = 1000
+NOTIFY_BATCH_SIZE = 200
 
 
 def _batch_list(items, batch_size):
@@ -16,16 +19,28 @@ def _batch_list(items, batch_size):
         yield items[i:i + batch_size]
 
 
-def _process_project(project):
+def _shared_storage_confirmed():
+    """One global walk only covers every project when they all share one storage backend.
+    With per-project storage configs the walk would silently miss projects on other backends."""
+    try:
+        return bool(this.descriptor.config.get("always_use_shared_storage", True))
+    except Exception as e:  # pylint: disable=W0703
+        log.warning('Could not resolve always_use_shared_storage, skipping batch walk: %s', e)
+        return False
+
+
+def _process_project(project, buckets=None):
     """
     Process cleanup for a single project.
     Designed to run in a thread pool worker.
+    `buckets`, if given, comes from a single precomputed global walk instead of a per-project one.
     """
     project_id = project["id"]
     project_name = project.get("name", f"project_{project_id}")
     try:
         engine = MinioClient(project)
-        bucket_results = engine.cleanup_all_buckets()
+        metas = engine.load_metas(buckets) if buckets is not None and hasattr(engine, "load_metas") else None
+        bucket_results = engine.cleanup_all_buckets(buckets=buckets, metas=metas)
         if bucket_results:
             files_deleted = sum(bucket_results.values())
             return {
@@ -42,6 +57,38 @@ def _process_project(project):
             "name": project_name,
             "error": str(e)
         }
+
+
+def _notify_bucket_expiration(rpc_manager, buckets_by_project, project_list):
+    """Send the precomputed listing in project-sized chunks: a whole-deployment bucket map
+    in one RPC argument would just move the latency into serialization/transport."""
+    if buckets_by_project is None:
+        # No precomputed listing: the notifier walks storage per project itself.
+        try:
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
+        return
+    #
+    if not project_list:
+        # A listing without the projects it was built from can't be chunked, and sending it
+        # whole is the unbounded payload we're avoiding -- drop to the per-project walk.
+        log.warning('Precomputed bucket listing without a project list, ignoring it')
+        try:
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
+        return
+    #
+    for batch in _batch_list(project_list, NOTIFY_BATCH_SIZE):
+        chunk = {str(p["id"]): buckets_by_project.get(str(p["id"]), []) for p in batch}
+        try:
+            # Pass our own project dicts so the callee doesn't re-fetch the full project table per chunk.
+            rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications(
+                buckets_by_project=chunk, projects=batch
+            )
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Failed to run bucket expiration notifications: %s', e)
 
 
 class RPC:
@@ -63,10 +110,25 @@ class RPC:
             dict: Cleanup results with statistics per project
         """
         try:
-            try:
-                self.context.rpc_manager.timeout(60).artifacts_check_bucket_expiration_notifications()
-            except Exception as e:
-                log.warning('Failed to run bucket expiration notifications: %s', e)
+            # Walk once and share the listing with both the notifier and the deleter below,
+            # instead of each re-walking storage per project. Only engines that support the
+            # batch path (currently libcloud) get this; others keep their own per-call walk.
+            buckets_by_project = None
+            project_list = None
+            if hasattr(MinioClient, "list_all_buckets_by_project") and _shared_storage_confirmed():
+                try:
+                    project_list = self.context.rpc_manager.timeout(30).project_list(
+                        filter_={"create_success": True}
+                    )
+                    if project_list:
+                        buckets_by_project = MinioClient(project_list[0]).list_all_buckets_by_project()
+                except Exception as e:
+                    log.warning('Failed to precompute global bucket listing: %s', e)
+                    buckets_by_project = None
+
+            _notify_bucket_expiration(
+                self.context.rpc_manager, buckets_by_project, project_list
+            )
 
             if not issubclass(MinioClient, ManualCleanupMixin):
                 return {
@@ -74,9 +136,10 @@ class RPC:
                     "reason": "Storage engine handles lifecycle natively"
                 }
 
-            project_list = self.context.rpc_manager.timeout(30).project_list(
-                filter_={"create_success": True}
-            )
+            if project_list is None:
+                project_list = self.context.rpc_manager.timeout(30).project_list(
+                    filter_={"create_success": True}
+                )
 
             all_results = {}
             total_files_deleted = 0
@@ -93,7 +156,13 @@ class RPC:
                 )
 
                 with ThreadPoolExecutor() as executor:
-                    futures = {executor.submit(_process_project, p): p for p in batch}
+                    futures = {
+                        executor.submit(
+                            _process_project, p,
+                            buckets_by_project.get(str(p["id"]), []) if buckets_by_project is not None else None
+                        ): p
+                        for p in batch
+                    }
 
                     for future in as_completed(futures):
                         result = future.result()
