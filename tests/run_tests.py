@@ -40,6 +40,7 @@ def install_stubs():
     pylon_core_tools.log = StubLog()
     pylon_core_tools.module = types.ModuleType('pylon.core.tools.module')
     pylon_core_tools.web = types.ModuleType('pylon.core.tools.web')
+    pylon_core_tools.web.rpc = lambda *a, **kw: (lambda func: func)
     pylon_core_tools_context.Context = StubContext
 
     sys.modules.setdefault('pylon', pylon_stub)
