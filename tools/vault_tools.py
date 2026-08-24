@@ -98,6 +98,9 @@ class HashiCorpVaultClient:
             if isinstance(project, int) or isinstance(project, str):
                 project = RpcMixin().rpc.call.project_get_or_404(project_id=project)
                 auth = project.secrets_json
+                # Read is done; close it here instead of leaving it open for whatever
+                # long-running work (e.g. a blocking predict wait) the caller does next.
+                db.session.commit()
             elif isinstance(project, dict):
                 auth = project
             elif project is not None:

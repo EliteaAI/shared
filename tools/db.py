@@ -166,6 +166,18 @@ class SessionProxy(metaclass=SessionProxyMeta):  # pylint: disable=R0902,R0903
         #
         return getattr(context.local.db_session, name)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Commit only, never close: this is the shared per-request session,
+        # other code later in the same request still needs it alive.
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
 
 # DB: proxy
 session = SessionProxy()

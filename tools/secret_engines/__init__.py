@@ -27,6 +27,7 @@ from pylon.core.tools import log  # pylint: disable=E0401
 from pylon.core.tools.context import Context as Holder  # pylint: disable=E0401
 
 from tools import context  # pylint: disable=E0401
+from .. import db  # pylint: disable=E0401
 
 
 def get_project_id(project: Any) -> Optional[int]:
@@ -34,7 +35,11 @@ def get_project_id(project: Any) -> Optional[int]:
         return None
     elif isinstance(project, (int, str)):
         project = context.rpc_manager.call.project_get_or_404(project_id=project)
-        return project.id
+        project_id = project.id
+        # Read is done; close it here instead of leaving it open for whatever
+        # long-running work the caller (e.g. a blocking predict wait) does next.
+        db.session.commit()
+        return project_id
     elif isinstance(project, dict):
         return project["id"]
     elif project is not None:
