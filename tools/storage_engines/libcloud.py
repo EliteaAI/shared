@@ -560,6 +560,9 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         self.copy_object(source_bucket, source_filename, destination_bucket, destination_filename)
         self.remove_file(source_bucket, source_filename)
 
+    def rename_file(self, bucket, old_name, new_name):
+        self.move_object(bucket, old_name, bucket, new_name)
+
 
 class Engine(EngineBase):
     """ Engine class """
