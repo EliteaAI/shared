@@ -253,6 +253,20 @@ class MinioClientABC(ABC, EventManagerMixin):
                 return True
         return False
 
+    def rename_file(self, bucket: str, old_name: str, new_name: str):
+        bucket_name = self.format_bucket_name(bucket)
+        if not self.is_file_exist(bucket_name, old_name):
+            raise FileNotFoundError(f"Source file does not exist: {old_name}")
+        if self.is_file_exist(bucket_name, new_name):
+            raise FileExistsError(f"Destination file already exists: {new_name}")
+        copy_source = f"{bucket_name}/{old_name}"
+        self.s3_client.copy_object(
+            Bucket=bucket_name,
+            CopySource=copy_source,
+            Key=new_name
+        )
+        self.s3_client.delete_object(Bucket=bucket_name, Key=old_name)
+
 
 class S3MinioClient(MinioClientABC):
     @classmethod
