@@ -107,6 +107,9 @@ class Module(module.ModuleModel):
         #
         self.descriptor.register_tool('register_openapi', noop_decorator)
         self.descriptor.register_tool('serialize', noop_func)
+        #
+        from .tools.openapi_tools import sanitize_property_name
+        self.descriptor.register_tool('sanitize_property_name', sanitize_property_name)
 
     def init(self):
         """ Init module """
@@ -223,9 +226,10 @@ class Module(module.ModuleModel):
         self.descriptor.register_tool('prettify', prettify)
 
         # OpenAPI tools
-        from .tools.openapi_tools import register_openapi, openapi_registry
+        from .tools.openapi_tools import register_openapi, openapi_registry, sanitize_property_name
         self.descriptor.register_tool('register_openapi', register_openapi)
         self.descriptor.register_tool('openapi_registry', openapi_registry)
+        self.descriptor.register_tool('sanitize_property_name', sanitize_property_name)
 
         # self.descriptor.init_api()
         self.descriptor.init_rpcs()
