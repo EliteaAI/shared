@@ -490,8 +490,11 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
             ),
         )
         #
-        if os.path.exists(old_path):
-            os.rename(old_path, new_path)
+        if not os.path.exists(old_path):
+            raise FileNotFoundError(f"Source file does not exist: {old_name}")
+        if os.path.exists(new_path):
+            raise FileExistsError(f"Destination file already exists: {new_name}")
+        os.rename(old_path, new_path)
 
 
 class Engine(EngineBase):
