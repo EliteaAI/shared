@@ -30,10 +30,31 @@ Usage in plugin module.py:
             api_module=api_v2,  # Will auto-scan all API classes in the package
         )
 """
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 from pydantic import BaseModel
 
 from pylon.core.tools import log
+
+PROPERTY_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+_INVALID_PROPERTY_CHARS = re.compile(r"[^a-zA-Z0-9_.-]")
+
+
+def sanitize_property_name(name: str) -> str:
+    """Sanitize a schema property name so it matches ^[a-zA-Z0-9_.-]{1,64}$.
+
+    Anthropic rejects the whole tool array if any property key contains other
+    characters, so bracketed query params like "fname[]" must be rewritten.
+    Kept as a pure function: the MCP tool executor re-derives the sanitized
+    name from the OpenAPI spec to map arguments back, so both sides must agree
+    without sharing state.
+    """
+    if PROPERTY_NAME_PATTERN.match(name):
+        return name
+    sanitized = _INVALID_PROPERTY_CHARS.sub("", name)
+    if not sanitized:
+        sanitized = "field"
+    return sanitized[:64]
 
 
 def pydantic_to_openapi_schema(model: Type[BaseModel]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -155,12 +176,19 @@ def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         if param_in in ("path", "query"):
-            properties[param_name] = {
+            prop_name = sanitize_property_name(param_name)
+            if prop_name != param_name and prop_name in properties:
+                log.warning(
+                    f"Sanitized parameter name '{param_name}' collides with existing "
+                    f"property '{prop_name}'; skipping to avoid overwriting it"
+                )
+                continue
+            properties[prop_name] = {
                 **param_schema,
                 "description": param_description or f"{param_in.title()} parameter: {param_name}",
             }
             if param_required or param_in == "path":
-                required.append(param_name)
+                required.append(prop_name)
 
     request_body = endpoint.get("request_body")
     if request_body is not None:
