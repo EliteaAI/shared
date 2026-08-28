@@ -561,6 +561,10 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         self.remove_file(source_bucket, source_filename)
 
     def rename_file(self, bucket, old_name, new_name):
+        if not self.is_file_exist(bucket, old_name):
+            raise FileNotFoundError(f"Source file does not exist: {old_name}")
+        if self.is_file_exist(bucket, new_name):
+            raise FileExistsError(f"Destination file already exists: {new_name}")
         self.move_object(bucket, old_name, bucket, new_name)
 
 
