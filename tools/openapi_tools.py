@@ -190,7 +190,11 @@ def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
             if param_required or param_in == "path":
                 required.append(prop_name)
 
-    request_body = endpoint.get("request_body")
+    # A public endpoint may accept fields that must not be model-authorable. Keep its full
+    # OpenAPI request body for HTTP clients, but let the MCP projection expose a narrower DTO.
+    request_body = endpoint.get("mcp_request_body")
+    if request_body is None:
+        request_body = endpoint.get("request_body")
     if request_body is not None:
         try:
             body_schema, definitions = pydantic_to_openapi_schema(request_body)
@@ -290,6 +294,7 @@ class OpenAPIRegistry:
         tags: Optional[List[str]] = None,
         parameters: Optional[List[Dict]] = None,
         request_body: Optional[Type[BaseModel]] = None,
+        mcp_request_body: Optional[Type[BaseModel]] = None,
         response_model: Optional[Type[BaseModel]] = None,
         responses: Optional[Dict] = None,
         security: Optional[List[Dict]] = None,
@@ -297,7 +302,13 @@ class OpenAPIRegistry:
         mcp_tool: bool = False,
         available_to_users: bool = False,
     ) -> None:
-        """Register an API endpoint."""
+        """Register an API endpoint.
+
+        ``request_body`` remains the HTTP/OpenAPI contract. When supplied,
+        ``mcp_request_body`` is used only to build the model-facing MCP tool schema; this
+        prevents server-owned or otherwise non-authorable HTTP fields from becoming model
+        inputs without creating a second endpoint.
+        """
         if plugin_name not in self._endpoints:
             self._endpoints[plugin_name] = []
 
@@ -313,6 +324,7 @@ class OpenAPIRegistry:
             "tags": tags or [plugin_name],
             "parameters": parameters or [],
             "request_body": request_body,
+            "mcp_request_body": mcp_request_body,
             "response_model": response_model,
             "responses": responses,
             "security": security,
@@ -649,6 +661,7 @@ def register_openapi(
     tags: Optional[List[str]] = None,
     parameters: Optional[List[Dict]] = None,
     request_body=None,
+    mcp_request_body=None,
     response_model: Optional[Type[BaseModel]] = None,
     responses: Optional[Dict] = None,
     deprecated: bool = False,
@@ -660,6 +673,8 @@ def register_openapi(
     Decorator to document API methods with OpenAPI metadata.
 
     Use alongside @auth.decorators.check_api() - this decorator should come FIRST.
+    ``mcp_request_body`` may narrow the model-facing MCP schema while ``request_body``
+    continues to define the public HTTP/OpenAPI contract.
 
     Example:
         @openapi(
@@ -680,6 +695,7 @@ def register_openapi(
             "tags": tags or [],
             "parameters": parameters or [],
             "request_body": request_body,
+            "mcp_request_body": mcp_request_body,
             "response_model": response_model,
             "responses": responses,
             "deprecated": deprecated,
@@ -876,6 +892,7 @@ def register_api_class(
                 tags=openapi_meta.get("tags") or [plugin_name],
                 parameters=all_params,
                 request_body=openapi_meta.get("request_body"),
+                mcp_request_body=openapi_meta.get("mcp_request_body"),
                 response_model=openapi_meta.get("response_model"),
                 responses=openapi_meta.get("responses"),
                 deprecated=openapi_meta.get("deprecated", False),
