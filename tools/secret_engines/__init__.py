@@ -78,6 +78,7 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
             "secrets": {},
             "hidden_secrets": {},
             "shared_secrets": {},
+            "external_access": {},
         }
         #
         self.set_project_secrets = self.set_secrets
@@ -157,6 +158,35 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
             secrets.pop(name, None)
         self.set_hidden_secrets(secrets)
         return secrets
+
+    def set_external_access(self, flags, **kwargs):
+        _ = kwargs
+        #
+        data = self._read()
+        data["external_access"] = flags
+        self._write(data)
+        #
+        self._cache["external_access"] = flags
+
+    def update_external_access(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        flags = self.get_external_access()
+        flags.update(add or {})
+        for name in (remove or ()):
+            flags.pop(name, None)
+        self.set_external_access(flags)
+        return flags
+
+    def get_external_access(self, *args, **kwargs):
+        _ = args, kwargs
+        #
+        if not self._cache["external_access"]:
+            data = self._read()
+            # Absent section means nothing is shareable, which is the safe default
+            # and is why no migration is needed for pre-existing projects.
+            self._cache["external_access"] = data.get("external_access", {})
+        #
+        return self._cache["external_access"].copy()
 
     def get_secrets(self, *args, **kwargs):
         _ = args, kwargs

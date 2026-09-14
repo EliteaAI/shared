@@ -134,6 +134,10 @@ class Engine(EngineBase):  # pylint: disable=R0902
         _ = kwargs
         self._write_section("hidden_secrets", secrets)
 
+    def set_external_access(self, flags, **kwargs):
+        _ = kwargs
+        self._write_section("external_access", flags)
+
     def _update_section(self, section, add=None, remove=None):
         # Lock before reading, so merge is atomic vs same-section concurrent writers.
         key = self._read_key()
@@ -167,6 +171,10 @@ class Engine(EngineBase):  # pylint: disable=R0902
     def update_hidden_secrets(self, add=None, remove=None, **kwargs):
         _ = kwargs
         return self._update_section("hidden_secrets", add, remove)
+
+    def update_external_access(self, add=None, remove=None, **kwargs):
+        _ = kwargs
+        return self._update_section("external_access", add, remove)
 
     def create_project_space(self, *args, **kwargs):
         _ = args, kwargs

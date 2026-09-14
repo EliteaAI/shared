@@ -23,7 +23,7 @@ from functools import wraps, partial
 from typing import Optional, Any, Union, List, Tuple
 
 import hvac  # actually comes from pylon
-from hvac.exceptions import InvalidRequest
+from hvac.exceptions import InvalidRequest, InvalidPath, Forbidden
 from pydantic.v1 import BaseModel, constr, ValidationError
 
 from pylon.core.tools import log
@@ -110,6 +110,7 @@ class HashiCorpVaultClient:
 
         self.kv_mount = f'kv-for-{self.vault_name}'
         self.hidden_kv_mount = f'kv-for-hidden-{self.vault_name}'
+        self.external_kv_mount = f'kv-for-external-{self.vault_name}'
         self.approle_name = f'role-for-{self.vault_name}'
         self.policy_name = f'policy-for-{self.vault_name}'
 
@@ -118,7 +119,8 @@ class HashiCorpVaultClient:
         self._cache = {
             'secrets': {},
             'hidden_secrets': {},
-            'shared_secrets': {}
+            'shared_secrets': {},
+            'external_access': {}
         }
 
         self.set_project_secrets = self.set_secrets
@@ -249,6 +251,7 @@ class HashiCorpVaultClient:
             self._make_policy(f'auth/{self.approle_auth_path}/login', ["create", "read"], 'Login with Carrier AppRole'),
             self._make_policy(f'{self.kv_mount}/*', comment='Read/write secrets'),
             self._make_policy(f'{self.hidden_kv_mount}/*', comment='Read/write hidden secrets'),
+            self._make_policy(f'{self.external_kv_mount}/*', comment='Read/write external access flags'),
         ]
         if not self.is_administration:
             policies.append(
@@ -306,6 +309,13 @@ class HashiCorpVaultClient:
             if not quiet:
                 raise
 
+        # Create external access flags KV
+        try:
+            self._add_secrets_engine(self.external_kv_mount)
+        except InvalidRequest:
+            if not quiet:
+                raise
+
         # Create AppRole
         self.auth = self._init_approle()
         return self.auth
@@ -313,10 +323,14 @@ class HashiCorpVaultClient:
     @with_admin_token
     def remove_project_space(self) -> None:
         """ Remove project-specific data from Vault """
-        for vault_mount in [self.hidden_kv_mount, self.kv_mount]:
-            self.client.sys.disable_secrets_engine(
-                path=vault_mount,
-            )
+        for vault_mount in [self.external_kv_mount, self.hidden_kv_mount, self.kv_mount]:
+            try:
+                self.client.sys.disable_secrets_engine(
+                    path=vault_mount,
+                )
+            except InvalidPath:
+                # Projects created before a mount existed simply have nothing to remove
+                log.info('No %s mount to remove for project %s', vault_mount, self.project_id)
         try:
             self.client.auth.approle.delete_role(
                 self.approle_name,
@@ -379,6 +393,44 @@ class HashiCorpVaultClient:
         #     log.error("Exception Forbidden in get_project_hidden_secret")
         #     self.__set_hidden_kv_permissions()
         #     return {}
+
+    @with_admin_token
+    def _ensure_external_kv(self) -> None:
+        """ Create the external access KV and grant it, for projects predating it """
+        self.__set_policy()
+        self._add_secrets_engine(self.external_kv_mount)
+
+    def set_external_access(self, flags: dict) -> None:
+        """ Set the per-secret external access flags """
+        # Done on every write rather than as a migration: flag writes are rare,
+        # and this way a project created before the mount existed just works.
+        self._ensure_external_kv()
+        self.client.secrets.kv.v2.create_or_update_secret(
+            path=self.secrets_path,
+            mount_point=self.external_kv_mount,
+            secret=flags,
+        )
+        self._cache['external_access'] = flags
+
+    def update_external_access(self, add: Optional[dict] = None, remove: Optional[list] = None) -> dict:
+        """ Add/remove external access flags without rewriting the whole set """
+        flags = dict(self.get_external_access())
+        flags.update(add or {})
+        for name in (remove or ()):
+            flags.pop(name, None)
+        self.set_external_access(flags)
+        return flags
+
+    def get_external_access(self) -> dict:
+        """ Get the per-secret external access flags """
+        if not self._cache['external_access']:
+            try:
+                self._cache['external_access'] = self._get_vault_data(self.external_kv_mount)
+            except (InvalidPath, Forbidden):
+                # No mount yet means nothing is shareable, which is the safe default
+                # and is why pre-existing projects need no migration.
+                self._cache['external_access'] = {}
+        return self._cache['external_access']
 
     def get_all_secrets(self) -> dict:
         if self.is_administration:
