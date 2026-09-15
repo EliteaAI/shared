@@ -75,6 +75,7 @@ class HashiCorpVaultClient:
     secrets_path: str = 'project-secrets'
     admin_kv_mount: str = f'kv-for-{c.VAULT_ADMINISTRATION_NAME}'
     template_node_name: str = 'secret'
+    _external_access_cas_attempts: int = 5
 
     @classmethod
     def from_project(cls, project: AnyProject, **kwargs):
@@ -375,6 +376,16 @@ class HashiCorpVaultClient:
             mount_point=mount_point,
         ).get("data", {}).get("data", {})
 
+    def _get_vault_data_version(self, mount_point: str) -> Tuple[dict, int]:
+        """ Read data together with the KV version it was read at, for CAS writes """
+        response = self.client.secrets.kv.v2.read_secret_version(
+            path=self.secrets_path,
+            mount_point=mount_point,
+        ).get("data", {})
+        data = response.get("data") or {}
+        version = response.get("metadata", {}).get("version", 0)
+        return data, version
+
     def get_secrets(self) -> dict:
         """ Get secrets """
         if not self._cache['secrets']:
@@ -400,7 +411,7 @@ class HashiCorpVaultClient:
         self.__set_policy()
         self._add_secrets_engine(self.external_kv_mount)
 
-    def set_external_access(self, flags: dict) -> None:
+    def set_external_access(self, flags: dict, cas: Optional[int] = None) -> None:
         """ Set the per-secret external access flags """
         # Done on every write rather than as a migration: flag writes are rare,
         # and this way a project created before the mount existed just works.
@@ -409,17 +420,35 @@ class HashiCorpVaultClient:
             path=self.secrets_path,
             mount_point=self.external_kv_mount,
             secret=flags,
+            cas=cas,
         )
         self._cache['external_access'] = flags
 
     def update_external_access(self, add: Optional[dict] = None, remove: Optional[list] = None) -> dict:
         """ Add/remove external access flags without rewriting the whole set """
-        flags = dict(self.get_external_access())
-        flags.update(add or {})
-        for name in (remove or ()):
-            flags.pop(name, None)
-        self.set_external_access(flags)
-        return flags
+        # These flags are an authorization control, so a lost update would silently
+        # restore a grant someone else just revoked. KV v2 CAS rejects the write if the
+        # version moved since we read it; cas=0 means "only if absent" for the first write.
+        for _ in range(self._external_access_cas_attempts):
+            try:
+                stored, version = self._get_vault_data_version(self.external_kv_mount)
+            except (InvalidPath, Forbidden):
+                stored, version = {}, 0
+            flags = dict(stored)
+            flags.update(add or {})
+            for name in (remove or ()):
+                flags.pop(name, None)
+            try:
+                self.set_external_access(flags, cas=version)
+            except InvalidRequest:
+                # Concurrent writer won the race; re-read and merge onto their result
+                self._cache['external_access'] = {}
+                continue
+            return flags
+        raise RuntimeError(
+            f"Could not update external access flags for project {self.project_id}: "
+            f"lost {self._external_access_cas_attempts} CAS races"
+        )
 
     def get_external_access(self) -> dict:
         """ Get the per-secret external access flags """

@@ -169,6 +169,8 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
         self._cache["external_access"] = flags
 
     def update_external_access(self, add=None, remove=None, **kwargs):
+        # Default fallback, racy like update_secrets above. Engines that can make this
+        # atomic override it: database via FOR UPDATE, managed Vault via KV v2 CAS.
         _ = kwargs
         flags = self.get_external_access()
         flags.update(add or {})
