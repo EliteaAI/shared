@@ -1,3 +1,5 @@
 pytest>=7.0.0
 cryptography>=41.0.0
 pydantic>=2.0.0
+# vault_tools renders its Vault policies with jinja2; pylon supplies it at runtime
+jinja2>=3.0.0
