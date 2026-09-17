@@ -560,7 +560,17 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
         self.copy_object(source_bucket, source_filename, destination_bucket, destination_filename)
         self.remove_file(source_bucket, source_filename)
 
+    @staticmethod
+    def _validate_file_name(name, param_name="name"):
+        """Reject path traversal attempts in file names."""
+        if not name:
+            raise ValueError(f"{param_name} cannot be empty")
+        if ".." in name or name.startswith("/") or "\\" in name:
+            raise ValueError(f"Invalid {param_name}: path traversal not allowed")
+
     def rename_file(self, bucket, old_name, new_name):
+        self._validate_file_name(old_name, "old_name")
+        self._validate_file_name(new_name, "new_name")
         if not self.is_file_exist(bucket, old_name):
             raise FileNotFoundError(f"Source file does not exist: {old_name}")
         if self.is_file_exist(bucket, new_name):

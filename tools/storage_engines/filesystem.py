@@ -463,7 +463,17 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
         #
         return os.path.exists(path)
 
+    @staticmethod
+    def _validate_file_name(name, param_name="name"):
+        """Reject path traversal attempts in file names."""
+        if not name:
+            raise ValueError(f"{param_name} cannot be empty")
+        if ".." in name or name.startswith("/") or "\\" in name:
+            raise ValueError(f"Invalid {param_name}: path traversal not allowed")
+
     def rename_file(self, bucket, old_name, new_name):
+        self._validate_file_name(old_name, "old_name")
+        self._validate_file_name(new_name, "new_name")
         bucket_name = self.format_bucket_name(bucket)
         bucket_path = os.path.join(
             self.bucket_path,
