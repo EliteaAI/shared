@@ -29,7 +29,7 @@ from tools import context, this  # pylint: disable=E0401
 from tools import config as c  # pylint: disable=E0401
 
 from ..minio_tools import space_monitor, throughput_monitor  # pylint: disable=E0401
-from . import fs_encode_name, fs_decode_name
+from . import fs_encode_name, fs_decode_name, validate_file_name
 
 
 class EngineMeta(type):
@@ -463,17 +463,9 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
         #
         return os.path.exists(path)
 
-    @staticmethod
-    def _validate_file_name(name, param_name="name"):
-        """Reject path traversal attempts in file names."""
-        if not name:
-            raise ValueError(f"{param_name} cannot be empty")
-        if ".." in name or name.startswith("/") or "\\" in name:
-            raise ValueError(f"Invalid {param_name}: path traversal not allowed")
-
     def rename_file(self, bucket, old_name, new_name):
-        self._validate_file_name(old_name, "old_name")
-        self._validate_file_name(new_name, "new_name")
+        validate_file_name(old_name, "old_name")
+        validate_file_name(new_name, "new_name")
         bucket_name = self.format_bucket_name(bucket)
         bucket_path = os.path.join(
             self.bucket_path,

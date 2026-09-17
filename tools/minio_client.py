@@ -14,6 +14,7 @@ from .rpc_tools import RpcMixin, EventManagerMixin
 from tools import this
 from tools import config as c
 from .minio_tools import space_monitor, throughput_monitor
+from .storage_engines import validate_file_name
 
 
 class MinioClientABC(ABC, EventManagerMixin):
@@ -253,26 +254,17 @@ class MinioClientABC(ABC, EventManagerMixin):
                 return True
         return False
 
-    @staticmethod
-    def _validate_file_name(name: str, param_name: str = "name") -> None:
-        """Reject path traversal attempts in file names."""
-        if not name:
-            raise ValueError(f"{param_name} cannot be empty")
-        if ".." in name or name.startswith("/") or "\\" in name:
-            raise ValueError(f"Invalid {param_name}: path traversal not allowed")
-
     def rename_file(self, bucket: str, old_name: str, new_name: str):
-        self._validate_file_name(old_name, "old_name")
-        self._validate_file_name(new_name, "new_name")
+        validate_file_name(old_name, "old_name")
+        validate_file_name(new_name, "new_name")
         bucket_name = self.format_bucket_name(bucket)
         if not self.is_file_exist(bucket_name, old_name):
             raise FileNotFoundError(f"Source file does not exist: {old_name}")
         if self.is_file_exist(bucket_name, new_name):
             raise FileExistsError(f"Destination file already exists: {new_name}")
-        copy_source = f"{bucket_name}/{old_name}"
         self.s3_client.copy_object(
             Bucket=bucket_name,
-            CopySource=copy_source,
+            CopySource={"Bucket": bucket_name, "Key": old_name},
             Key=new_name
         )
         try:
