@@ -275,7 +275,17 @@ class MinioClientABC(ABC, EventManagerMixin):
             CopySource=copy_source,
             Key=new_name
         )
-        self.s3_client.delete_object(Bucket=bucket_name, Key=old_name)
+        try:
+            self.s3_client.delete_object(Bucket=bucket_name, Key=old_name)
+        except Exception as e:
+            log.error(
+                "Rename partially failed: copied '%s' to '%s' but could not delete original: %s",
+                old_name, new_name, e
+            )
+            raise RuntimeError(
+                f"Rename partially completed: '{new_name}' was created but '{old_name}' "
+                f"still exists. Manual cleanup required."
+            ) from e
 
 
 class S3MinioClient(MinioClientABC):
