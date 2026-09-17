@@ -36,7 +36,7 @@ from tools import config as c  # pylint: disable=E0401
 from .. import db
 from ..minio_tools import space_monitor, throughput_monitor  # pylint: disable=E0401
 from ...models.storage import StorageMeta
-from . import fs_encode_name, fs_decode_name, lifecycle_from_meta
+from . import fs_encode_name, fs_decode_name, lifecycle_from_meta, validate_file_name
 from .storage_mixin import ManualCleanupMixin
 
 
@@ -559,6 +559,38 @@ class EngineBase(ManualCleanupMixin, metaclass=EngineMeta):
 
         self.copy_object(source_bucket, source_filename, destination_bucket, destination_filename)
         self.remove_file(source_bucket, source_filename)
+
+    def rename_file(self, bucket, old_name, new_name):
+        validate_file_name(old_name, "old_name")
+        validate_file_name(new_name, "new_name")
+        if not self.is_file_exist(bucket, old_name):
+            raise FileNotFoundError(f"Source file does not exist: {old_name}")
+        if self.is_file_exist(bucket, new_name):
+            raise FileExistsError(f"Destination file already exists: {new_name}")
+        # For LOCAL driver, use direct filesystem rename instead of copy+delete
+        if self.storage_libcloud_driver == "LOCAL":
+            bucket_name = self.format_bucket_name(bucket)
+            bucket_key = fs_encode_name(
+                name=bucket_name,
+                kind="bucket",
+                encoder=self.storage_libcloud_encoder,
+            )
+            old_key = fs_encode_name(
+                name=old_name,
+                kind="file",
+                encoder=self.storage_libcloud_encoder,
+            )
+            new_key = fs_encode_name(
+                name=new_name,
+                kind="file",
+                encoder=self.storage_libcloud_encoder,
+            )
+            base_path = self.driver.base_path
+            old_path = os.path.join(base_path, bucket_key, old_key)
+            new_path = os.path.join(base_path, bucket_key, new_key)
+            os.rename(old_path, new_path)
+        else:
+            self.move_object(bucket, old_name, bucket, new_name)
 
 
 class Engine(EngineBase):

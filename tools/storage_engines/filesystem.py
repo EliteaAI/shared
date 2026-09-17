@@ -29,7 +29,7 @@ from tools import context, this  # pylint: disable=E0401
 from tools import config as c  # pylint: disable=E0401
 
 from ..minio_tools import space_monitor, throughput_monitor  # pylint: disable=E0401
-from . import fs_encode_name, fs_decode_name
+from . import fs_encode_name, fs_decode_name, validate_file_name
 
 
 class EngineMeta(type):
@@ -462,6 +462,41 @@ class EngineBase(metaclass=EngineMeta):  # pylint: disable=R0902
         )
         #
         return os.path.exists(path)
+
+    def rename_file(self, bucket, old_name, new_name):
+        validate_file_name(old_name, "old_name")
+        validate_file_name(new_name, "new_name")
+        bucket_name = self.format_bucket_name(bucket)
+        bucket_path = os.path.join(
+            self.bucket_path,
+            fs_encode_name(
+                name=bucket_name,
+                kind="bucket",
+                encoder=self.storage_filesystem_encoder,
+            ),
+        )
+        old_path = os.path.join(
+            bucket_path,
+            fs_encode_name(
+                name=old_name,
+                kind="file",
+                encoder=self.storage_filesystem_encoder,
+            ),
+        )
+        new_path = os.path.join(
+            bucket_path,
+            fs_encode_name(
+                name=new_name,
+                kind="file",
+                encoder=self.storage_filesystem_encoder,
+            ),
+        )
+        #
+        if not os.path.exists(old_path):
+            raise FileNotFoundError(f"Source file does not exist: {old_name}")
+        if os.path.exists(new_path):
+            raise FileExistsError(f"Destination file already exists: {new_name}")
+        os.rename(old_path, new_path)
 
 
 class Engine(EngineBase):

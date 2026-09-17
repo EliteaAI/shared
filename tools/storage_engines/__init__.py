@@ -62,3 +62,14 @@ def lifecycle_from_meta(meta):
             },
         }],
     }
+
+
+def validate_file_name(name, param_name="name"):
+    """Reject path traversal attempts in file names.
+
+    Raises ValueError if name is empty or contains traversal patterns.
+    """
+    if not name:
+        raise ValueError(f"{param_name} cannot be empty")
+    if ".." in name or name.startswith("/") or "\\" in name:
+        raise ValueError(f"Invalid {param_name}: path traversal not allowed")
