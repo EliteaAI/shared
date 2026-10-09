@@ -190,6 +190,12 @@ class Module(module.ModuleModel):
         except Exception:  # pylint: disable=W0703
             log.warning("MinioClient initialization skipped")
 
+        try:
+            from .tools import artifact_crypto
+            self.descriptor.register_tool('artifact_crypto', artifact_crypto)
+        except Exception:  # pylint: disable=W0703
+            log.warning("artifact_crypto initialization skipped")
+
         from .tools.vault_tools import VaultClient
         self.descriptor.register_tool('VaultClient', VaultClient)
         try:

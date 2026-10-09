@@ -324,6 +324,9 @@ def endpoint_metrics(function):
                 except RuntimeError as e:
                     log.warning(f'send_metrics response.get_data raised {e}')
                     payload['response'] = None
+                except UnicodeDecodeError:
+                    # Binary body (file download) - nothing useful to log
+                    payload['response'] = None
                 rpc_tools.EventManagerMixin().event_manager.fire_event('usage_api_monitor', payload)
                 return response
             return function(*args, **kwargs)
