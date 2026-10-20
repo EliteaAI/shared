@@ -119,7 +119,7 @@ def test_minted_context_is_immutable_and_uncopyable():
 
 
 @pytest.mark.parametrize("bad", [
-    dict(purpose="release"), dict(purpose=None), dict(decision_id="a\r\nX-Evil: 1"), dict(decision_id=""),
+    dict(purpose="unknown"), dict(purpose=None), dict(decision_id="a\r\nX-Evil: 1"), dict(decision_id=""),
     dict(decision_id="x" * 129), dict(actor_ref=""), dict(project_id="1"), dict(project_id=True),
     dict(ref_id="not-a-uuid"),
 ])
@@ -137,7 +137,7 @@ def test_mint_accepts_uuid_decision_id():
 
 
 def test_purposes_are_the_designed_set():
-    assert stores.PURPOSES == {"onboard", "probe", "retire", "reconcile", "smoke"}
+    assert stores.PURPOSES == {"onboard", "probe", "retire", "reconcile", "smoke", "release"}
 
 
 # -- factory and flag-off ----------------------------------------------------------------------

@@ -19,11 +19,11 @@ import uuid
 
 _SEAL = object()  # module-private: only CredentialStoreProvider.mint holds it
 
-PURPOSES = frozenset({"onboard", "probe", "retire", "reconcile", "smoke"})
+PURPOSES = frozenset({"onboard", "probe", "retire", "reconcile", "smoke", "release"})
 
-# operation -> purposes allowed to perform it ("release" is added by WP-1D only)
+# operation -> purposes allowed to perform it ("release" is WP-1D: trusted credential release, read only)
 OPERATION_PURPOSES = {
-    "read": frozenset({"probe", "reconcile", "smoke"}),
+    "read": frozenset({"probe", "reconcile", "smoke", "release"}),
     "write": frozenset({"onboard"}),
     "metadata": frozenset({"probe", "reconcile", "smoke"}),
     "delete_all": frozenset({"retire", "reconcile"}),
