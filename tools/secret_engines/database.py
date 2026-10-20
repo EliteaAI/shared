@@ -27,6 +27,10 @@ from . import EngineBase
 from ...models.secrets import SecretsKey, SecretsData
 
 
+class SectionCheckFailed(Exception):
+    """ Raised by _update_section when its check callable rejects the current section """
+
+
 class Engine(EngineBase):  # pylint: disable=R0902
     """ Engine class """
     # TODO: use project and system schemas here too
@@ -138,8 +142,10 @@ class Engine(EngineBase):  # pylint: disable=R0902
         _ = kwargs
         self._write_section("external_access", flags)
 
-    def _update_section(self, section, add=None, remove=None):
+    def _update_section(self, section, add=None, remove=None, check=None):
         # Lock before reading, so merge is atomic vs same-section concurrent writers.
+        # check(current_section) runs under the row lock; falsy -> nothing is written
+        # and SectionCheckFailed is raised (compare-and-set for callers).
         key = self._read_key()
         with context.db.make_session() as session:
             data_obj = (
@@ -150,6 +156,9 @@ class Engine(EngineBase):  # pylint: disable=R0902
             )
             data = json.loads(Fernet(key).decrypt(data_obj.data).decode())
             target = data.setdefault(section, {})
+            if check is not None and not check(target):
+                session.rollback()
+                raise SectionCheckFailed(section)
             target.update(add or {})
             for name in (remove or ()):
                 target.pop(name, None)

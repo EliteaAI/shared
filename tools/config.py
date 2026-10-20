@@ -135,6 +135,18 @@ class Config(metaclass=SingletonABC):  # pylint: disable=R0903
                 ("SECRETS_ENGINE", "str", "managed_vault"),
                 ("SECRETS_MASTER_KEY", "str", None),
                 ("SECRETS_FILESYSTEM_PATH", "str", "/tmp/secrets"),
+                # Customer-operated Vault for governed credential references (all optional)
+                ("CORPORATE_VAULT_ADDR", "str", None),
+                ("CORPORATE_VAULT_NAMESPACE", "str", None),
+                ("CORPORATE_VAULT_MOUNT", "str", None),  # default kv-elitea
+                ("CORPORATE_VAULT_AUTH_METHOD", "str", None),  # jwt | kubernetes
+                ("CORPORATE_VAULT_AUTH_MOUNT", "str", None),  # default aks-elitea
+                ("CORPORATE_VAULT_ROLE", "str", None),  # default elitea-main
+                ("CORPORATE_VAULT_JWT_PATH", "str", None),  # default /var/run/secrets/vault/token
+                ("CORPORATE_VAULT_CA_BUNDLE", "str", None),
+                ("CORPORATE_VAULT_TENANT_SEGMENT", "str", None),
+                ("CORPORATE_VAULT_TIMEOUT_S", "int", None),  # default 5
+                ("CORPORATE_VAULT_INSECURE_DEV_HTTP", "bool", None),  # http only for localhost, *.localhost, 127.0.0.1
                 ("STORAGE_ENGINE", "str", "s3"),
                 ("STORAGE_FILESYSTEM_PATH", "str", "/tmp/storage"),
                 ("STORAGE_FILESYSTEM_ENCODER", "str", "base64"),
