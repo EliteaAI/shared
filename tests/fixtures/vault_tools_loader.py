@@ -58,6 +58,9 @@ def load_vault_tools():
     from .secret_engines_loader import load_secret_engines  # pylint: disable=C0415
     load_secret_engines()
 
+    # The hvac stubs only need to be in sys.modules while vault_tools imports (it keeps its own
+    # reference); they are put back afterwards so a real hvac stays importable for other tests.
+    saved_hvac = {name: sys.modules.get(name) for name in ("hvac", "hvac.exceptions")}
     hvac_exceptions = _ensure_module(
         "hvac.exceptions",
         InvalidRequest=InvalidRequest, InvalidPath=InvalidPath, Forbidden=Forbidden,
@@ -71,7 +74,14 @@ def load_vault_tools():
     _ensure_module("shared.tools.rpc_tools", RpcMixin=object)
     _ensure_module("shared.models.vault", Vault=object)
 
-    return load_file_as_module(
-        "shared.tools.vault_tools", SHARED_ROOT / "tools" / "vault_tools.py",
-        package="shared.tools",
-    )
+    try:
+        return load_file_as_module(
+            "shared.tools.vault_tools", SHARED_ROOT / "tools" / "vault_tools.py",
+            package="shared.tools",
+        )
+    finally:
+        for name, original in saved_hvac.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
