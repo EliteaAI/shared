@@ -16,16 +16,26 @@
 
 Imported lazily by get_store(); never imported when governance is off. This module only
 reads and writes secret versions: it has no init/unseal/seal/root/policy/mount/auth-enable paths.
+
+Customer policy (per tenant segment T): read/create/update on kv-elitea/data/t/T/cred/+, read on
+kv-elitea/metadata/t/T/cred/+, delete on that metadata path for retire, and, for prune() of old generations,
+update on kv-elitea/destroy/t/T/cred/+ (the smoke test only warns when that last one is missing).
+
+Connections: one HTTPAdapter (one urllib3 pool, TCP keep-alive on) is shared by every per-call Session.
+Read-only operations retry once on a dead kept-alive connection after dropping the pool; a CAS write never does.
 """
 
+import logging
 import os
 import re
+import socket
 import threading
 import time
 from urllib.parse import urlparse
 
 import hvac  # pylint: disable=E0401
 import requests  # pylint: disable=E0401
+from urllib3.connection import HTTPConnection  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0401
 
@@ -39,6 +49,7 @@ _CANARY_RE = re.compile(r"^canary-[a-z0-9-]{1,32}$")
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 _AUTH_METHODS = ("jwt", "kubernetes")
 _RELOGIN_MARGIN_S = 60
+_NO_SUCH_VERSION = 999999  # smoke probe of the destroy capability: a version that never exists
 
 _DEFAULTS = {
     "MOUNT": "kv-elitea",
@@ -48,6 +59,44 @@ _DEFAULTS = {
     "TIMEOUT_S": 5,
     "POOL_SIZE": 8,
 }
+
+
+class _KeepAliveAdapter(requests.adapters.HTTPAdapter):
+    """ HTTPAdapter whose sockets have SO_KEEPALIVE, so a half-dead idle connection is noticed by the kernel """
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["socket_options"] = list(HTTPConnection.default_socket_options) + [
+            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _new_adapter(pool_size):
+    return _KeepAliveAdapter(pool_connections=1, pool_maxsize=pool_size, max_retries=0, pool_block=False)
+
+
+class _PoolFullFilter(logging.Filter):  # pylint: disable=R0903
+    """ Drops urllib3's "Connection pool is full, discarding connection" warning for our Vault hosts only.
+
+    With pool_block=False a burst above POOL_SIZE opens extra connections that are closed on return: that is the
+    designed overflow, not a fault, and it would otherwise log once per extra connection.
+    """
+
+    hosts = set()
+
+    def filter(self, record):
+        message = str(record.msg)
+        return not (message.startswith("Connection pool is full") and record.args and record.args[0] in self.hosts)
+
+
+_POOL_FULL_FILTER = _PoolFullFilter()
+logging.getLogger("urllib3.connectionpool").addFilter(_POOL_FULL_FILTER)
+
+
+def _is_stale_connection(exc):
+    """ A kept-alive connection the peer already closed (and nothing deterministic like TLS or a timeout) """
+    if isinstance(exc, (requests.exceptions.SSLError, requests.exceptions.Timeout)):
+        return False
+    return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError))
 
 
 def _is_local_host(host):
@@ -115,9 +164,8 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
             raise invalid("POOL_SIZE")
         # one adapter = one urllib3 pool for the process: keep-alive and TLS sessions survive across calls
         # (sessions stay per call for header isolation and must never be close()d: that closes this pool)
-        self._adapter = requests.adapters.HTTPAdapter(
-            pool_connections=1, pool_maxsize=pool_size, max_retries=0, pool_block=False,
-        )
+        self._adapter = _new_adapter(pool_size)
+        _POOL_FULL_FILTER.hosts.add(parsed.hostname)
         #
         self._lock = threading.Lock()
         self._token = None
@@ -176,33 +224,46 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         with self._lock:
             self._token = None
 
-    def _call(self, ctx, operation, relogin=True, details=None):
+    def _call(self, ctx, operation, relogin=True, details=None, readonly=False):
         """ Run operation(client) with a session-scoped client; maps every failure to StoreError.
 
-        details is an optional dict the operation keeps current (e.g. the ref_id in flight): it rides on the error.
+        details is an optional dict the operation keeps current (e.g. the ref_id in flight): it is cleared at the
+        start of every attempt and rides on the error. readonly operations are retried ONCE on a dead kept-alive
+        connection (after dropping the pool); anything with a CAS write must leave readonly False.
         """
-        session = self._session(ctx)
-        try:
-            fresh = False
-            token = self._cached_token()
-            if token is None:
-                token, fresh = self._login(session), True
-            for attempt in (0, 1):
-                client = self._client(session)
-                client.token = token
-                try:
-                    return operation(client)
-                except hvac.exceptions.Forbidden:
-                    if fresh or attempt or not relogin:
-                        raise
-                    self._forget_token()
-                    token, fresh = self._login(session), True
-        except StoreError:
-            raise
-        except Exception as exc:  # pylint: disable=W0703
-            code = _error_code(exc)
+        details = {} if details is None else details
+        for transport_attempt in (0, 1):
+            try:
+                return self._attempt(ctx, operation, relogin, details)
+            except StoreError:
+                raise
+            except Exception as exc:  # pylint: disable=W0703
+                if readonly and transport_attempt == 0 and _is_stale_connection(exc):
+                    self._adapter.poolmanager.clear()
+                    continue
+                code = _error_code(exc)
+            raise StoreError(code, details) from None
+        raise StoreError("UNAVAILABLE")  # unreachable: the second attempt always returns or raises
+
+    def _attempt(self, ctx, operation, relogin, details):
         # no session.close(): it would close the shared adapter's pool; the session is simply dropped
-        raise StoreError(code, details) from None
+        session = self._session(ctx)
+        fresh = False
+        token = self._cached_token()
+        if token is None:
+            token, fresh = self._login(session), True
+        for attempt in (0, 1):
+            client = self._client(session)
+            client.token = token
+            details.clear()
+            try:
+                return operation(client)
+            except hvac.exceptions.Forbidden:
+                if fresh or attempt or not relogin:
+                    raise
+                self._forget_token()
+                token, fresh = self._login(session), True
+        raise StoreError("UNAVAILABLE")  # unreachable
 
     def _path(self, ref_id):
         return f"t/{self._tenant}/cred/{ref_id}"
@@ -227,7 +288,7 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
                 found[(ref.ref_id, generation)] = self._read_version(client, ref, generation)
             return found
         #
-        return self._call(planned[0][2], operation, details=details)
+        return self._call(planned[0][2], operation, details=details, readonly=True)
 
     def _read_version(self, client, ref, generation):
         reply = client.secrets.kv.v2.read_secret_version(
@@ -263,7 +324,7 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         try:
             reply = self._call(ctx, lambda client: client.secrets.kv.v2.read_secret_metadata(
                 path=self._path(ref.ref_id), mount_point=self._mount,
-            ))
+            ), readonly=True)
         except StoreError as exc:
             if exc.code == "NOT_FOUND":
                 return SecretMetadata(current_version=0, versions=frozenset())
@@ -280,7 +341,11 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         )
 
     def prune(self, ref, keep_generations, ctx):
-        """ Destroy all but the newest keep_generations (>= 1) KV versions (needs update on <mount>/destroy/...) """
+        """ Destroy all but the newest keep_generations (>= 1) live KV versions (needs update on <mount>/destroy/...).
+
+        Soft-deleted versions (deletion_time set) are neither counted nor destroyed: they stay in Vault under its
+        own retention (max_versions); already destroyed versions are ignored too.
+        """
         check_context(ctx, ref, "prune")
         if isinstance(keep_generations, bool) or not isinstance(keep_generations, int) or keep_generations < 1:
             raise ValueError("keep_generations must be an integer >= 1")
@@ -301,7 +366,7 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
             return int(data.get("current_version") or 0), frozenset(present[-keep_generations:])
         #
         try:
-            current, versions = self._call(ctx, operation)
+            current, versions = self._call(ctx, operation, readonly=True)  # idempotent: recomputed from metadata
         except StoreError as exc:
             if exc.code == "NOT_FOUND":  # nothing stored: nothing to prune
                 return SecretMetadata(current_version=0, versions=frozenset())
@@ -345,7 +410,18 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         results["write_without_cas_refused"] = self._refused(ctx, lambda client: kv2(client).create_or_update_secret(
             path=f"t/{self._tenant}/cred/canary-smoke-nocas", secret={"smoke": "1"}, mount_point=self._mount,
         ))
+        self._warn_if_destroy_denied(ctx, canary)
         return results
+
+    def _warn_if_destroy_denied(self, ctx, canary):
+        """ prune() needs update on the destroy path: a warning only (not a check), nothing real is destroyed """
+        try:
+            self._call(ctx, lambda client: client.secrets.kv.v2.destroy_secret_versions(
+                path=f"t/{self._tenant}/cred/{canary}", versions=[_NO_SUCH_VERSION], mount_point=self._mount,
+            ), relogin=False)
+        except StoreError as exc:
+            if exc.code == "DENIED":
+                log.warning("corporate_vault smoke: destroy is not permitted on the tenant path: prune() will be refused")
 
     def _denied(self, ctx, operation):
         try:

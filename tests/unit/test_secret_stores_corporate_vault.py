@@ -17,6 +17,7 @@ from fixtures.secret_stores_loader import (  # noqa: E402  pylint: disable=C0413
 
 stores = load_secret_stores()
 corporate = import_module(f"{stores.__name__}.corporate_vault")
+_REAL_NEW_ADAPTER = corporate._new_adapter  # pylint: disable=W0212  # before any fixture swaps it for the fake
 SECRET_TEXT = "secret-text-fixture"
 
 
@@ -339,6 +340,8 @@ def test_error_map(vault, store, name, fault, code, operation):
         assert outcome == "ok"  # already gone: idempotent
     elif operation == "write" and code == "NOT_FOUND":
         assert outcome == "NOT_FOUND"
+    elif name == "connection error" and operation in ("read", "metadata"):
+        assert outcome == "ok"  # a dead kept-alive connection: read-only calls retry once (never write/delete)
     else:
         assert outcome == expected
 
@@ -525,8 +528,8 @@ def test_read_many_relogs_in_once_on_a_stale_token_and_still_uses_one_session(va
 
 def test_pool_size_defaults_to_eight_and_is_configurable_and_validated(vault, make):
     _ = vault
-    with pytest.MonkeyPatch.context() as patch:  # the fixture replaced HTTPAdapter with the fake: use the real class
-        patch.setattr(requests.adapters, "HTTPAdapter", _REAL_ADAPTER)
+    with pytest.MonkeyPatch.context() as patch:  # the fixture replaced the adapter factory with the fake
+        patch.setattr(corporate, "_new_adapter", _REAL_NEW_ADAPTER)
         assert make()._adapter._pool_maxsize == 8  # pylint: disable=W0212
         assert make(POOL_SIZE=3)._adapter._pool_maxsize == 3  # pylint: disable=W0212
         assert make(POOL_SIZE="16")._adapter._pool_maxsize == 16  # pylint: disable=W0212
@@ -536,7 +539,6 @@ def test_pool_size_defaults_to_eight_and_is_configurable_and_validated(vault, ma
             assert raised.value.code == "UNAVAILABLE"
 
 
-_REAL_ADAPTER = requests.adapters.HTTPAdapter
 
 
 class _KvServer:
@@ -546,7 +548,7 @@ class _KvServer:
         import http.server  # pylint: disable=C0415
         import threading  # pylint: disable=C0415
         outer = self
-        self.requests, self.connections = [], 0
+        self.requests, self.connections, self.drop = [], 0, 0  # drop: next N requests get the socket closed unanswered
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -569,6 +571,10 @@ class _KvServer:
 
             def do_GET(self):
                 outer.requests.append(("GET", self.path))
+                if outer.drop > 0:  # a kept-alive connection the peer is closing just as we reuse it
+                    outer.drop -= 1
+                    self.close_connection = True
+                    return
                 path, _, query = self.path.partition("?")
                 version = int(query.split("version=")[1].split("&")[0])
                 self._reply({"data": {"data": bundles[path.rsplit("/", 1)[1]],
@@ -635,6 +641,173 @@ def test_prune_destroy_redirect_is_not_success(vault, store):
     with pytest.raises(stores.StoreError) as raised:
         store.prune(ref, 1, mint(stores, "reconcile", ref))
     assert raised.value.code == "UNAVAILABLE"
+
+
+def _kv_store(tmp_path, refs, pool_size=None):
+    kv = _KvServer({str(ref.ref_id): {"api_key": SECRET_TEXT} for ref in refs})
+    overrides = {"POOL_SIZE": pool_size} if pool_size else {}
+    store = corporate.CorporateVaultSecretStore(vault_config(tmp_path, ADDR=kv.url, INSECURE_DEV_HTTP=True, **overrides))
+    return kv, store
+
+
+def test_a_dead_kept_alive_connection_is_retried_once_for_reads(tmp_path):
+    refs = [new_ref(stores, 1, "corporate_vault") for _ in range(3)]
+    ctxs = [mint(stores, "release", ref) for ref in refs]
+    kv, store = _kv_store(tmp_path, refs)
+    try:
+        assert len(store.read_many(refs, [1] * 3, ctxs)) == 3 and kv.connections == 1
+        kv.drop = 1                                   # the pooled connection dies under the next request
+        assert len(store.read_many(refs, [1] * 3, ctxs)) == 3
+        assert kv.connections == 2                    # pool dropped, one fresh connection, no more
+        gets = [r for r in kv.requests if r[0] == "GET"]
+        assert len(gets) == 3 + 1 + 3                 # first call, the dropped GET, the complete retry
+        kv.drop = 2                                   # a second consecutive failure is final: one retry only
+        with pytest.raises(stores.StoreError) as raised:
+            store.read(refs[0], 1, mint(stores, "probe", refs[0]))
+        assert raised.value.code == "UNAVAILABLE"
+        kv.drop = 0
+        assert store.read(refs[0], 1, mint(stores, "probe", refs[0])).generation == 1  # and the store recovers
+    finally:
+        kv.close()
+
+
+def test_connection_errors_are_retried_for_reads_only_never_for_writes_or_tls(vault, store):
+    ref = new_ref(stores)
+    _write(store, ref)
+    posts = lambda: len([item for item in vault.requests_to("/data/") if item.method == "POST"])  # noqa: E731
+    gets = lambda: len([item for item in vault.requests_to("/data/") if item.method == "GET"])  # noqa: E731
+    #
+    vault.fail_next(exc=requests.exceptions.ConnectionError("reset"))
+    assert store.read(ref, 1, mint(stores, "probe", ref)).generation == 1
+    assert (vault.pool_clears, gets()) == (1, 2)
+    #
+    vault.fail_next(exc=requests.exceptions.ChunkedEncodingError("cut"))
+    store.metadata(ref, mint(stores, "probe", ref))
+    assert vault.pool_clears == 2
+    #
+    before = posts()
+    vault.fail_next(exc=requests.exceptions.ConnectionError("reset"))
+    with pytest.raises(stores.StoreError) as raised:
+        store.write(ref, _value(n="2"), expected_version=1, ctx=mint(stores, "onboard", ref))
+    assert raised.value.code == "UNAVAILABLE" and posts() - before == 1 and vault.pool_clears == 2  # CAS: never
+    #
+    vault.fail_next(exc=requests.exceptions.SSLError("bad certificate"))
+    with pytest.raises(stores.StoreError) as raised:
+        store.read(ref, 1, mint(stores, "probe", ref))
+    assert raised.value.code == "TLS_INVALID" and vault.pool_clears == 2                # deterministic: no retry
+    #
+    vault.fail_next(exc=requests.exceptions.ConnectTimeout("slow"))
+    with pytest.raises(stores.StoreError):
+        store.read(ref, 1, mint(stores, "probe", ref))
+    assert vault.pool_clears == 2                                                         # timeouts: no retry
+
+
+def test_sockets_get_tcp_keepalive_and_the_pool_is_sized_from_config(vault, make):
+    _ = vault
+    import socket  # pylint: disable=C0415
+    adapter = _REAL_NEW_ADAPTER(5)
+    options = adapter.poolmanager.connection_pool_kw["socket_options"]
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options and (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) in options
+    assert adapter._pool_maxsize == 5  # pylint: disable=W0212
+
+
+def test_concurrent_callers_never_leave_more_idle_connections_than_pool_size(tmp_path):
+    import threading  # pylint: disable=C0415
+    refs = [new_ref(stores, 1, "corporate_vault") for _ in range(2)]
+    kv, store = _kv_store(tmp_path, refs, pool_size=3)
+    store._adapter.pool_block = False  # pylint: disable=W0212
+    results, errors = [], []
+    start = threading.Barrier(12)
+    #
+    def work(index):
+        try:
+            start.wait(5)
+            for _ in range(3):
+                results.append(store.read(refs[index % 2], 1, mint(stores, "probe", refs[index % 2])).generation)
+        except Exception as exc:  # pylint: disable=W0703
+            errors.append(exc)
+    #
+    threads = [threading.Thread(target=work, args=(index,)) for index in range(12)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert not errors and results == [1] * 36
+        pools = store._adapter.poolmanager.pools  # pylint: disable=W0212
+        idle = sum(1 for key in list(pools.keys()) for conn in list(pools[key].pool.queue) if conn is not None)
+        assert 1 <= idle <= 3                          # overflow connections were closed, not kept
+        assert kv.connections >= 2
+    finally:
+        kv.close()
+
+
+def test_pool_overflow_warning_is_silenced_for_the_vault_host_only(vault, store, caplog):
+    _ = vault, store
+    import logging  # pylint: disable=C0415
+    logger = logging.getLogger("urllib3.connectionpool")
+    with caplog.at_level(logging.WARNING, logger="urllib3.connectionpool"):
+        logger.warning("Connection pool is full, discarding connection: %s. Connection pool size: %s",
+                       "vault.example.test", 8)
+        logger.warning("Connection pool is full, discarding connection: %s. Connection pool size: %s",
+                       "other.example.test", 8)
+        logger.warning("Retrying (%r) after connection broken by %r: %s", "r", "e", "/x")
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("vault.example.test" in message for message in messages)
+    assert any("other.example.test" in message for message in messages) and any("Retrying" in m for m in messages)
+
+
+def test_details_are_reset_for_every_attempt(vault, store):
+    ref = new_ref(stores)
+    _write(store, ref)  # caches a token so a stale-token 403 triggers a re-login retry
+    seen, details = [], {}
+    #
+    def operation(client):
+        seen.append(dict(details))
+        details["ref_id"] = "stale-from-attempt-one"
+        if len(seen) == 1:
+            raise hvac.exceptions.Forbidden("denied")
+        return "done"
+    #
+    assert store._call(mint(stores, "probe", ref), operation, details=details) == "done"  # pylint: disable=W0212
+    assert seen == [{}, {}]
+
+
+def test_prune_is_denied_when_the_policy_lacks_destroy(vault, store):
+    ref, other = _stored(store, 2, generations=3)
+    vault.denied_kinds.add("destroy")
+    with pytest.raises(stores.StoreError) as raised:
+        store.prune(ref, 1, mint(stores, "reconcile", ref))
+    assert raised.value.code == "DENIED"
+    assert store.metadata(ref, mint(stores, "probe", ref)).versions == frozenset({1, 2, 3})  # nothing was destroyed
+
+
+def test_prune_counts_only_live_versions_and_soft_deleted_ones_are_kept(vault, store):
+    (ref,) = _stored(store, 1, generations=5)
+    vault.kv[f"t/local/cred/{ref.ref_id}"]["destroyed"] = {1}       # destroyed earlier: listed, data gone
+    meta = store.prune(ref, 2, mint(stores, "reconcile", ref))
+    (destroy,) = [item for item in vault.seen if "/destroy/" in item.url]
+    assert destroy.body == {"versions": [2, 3]}                       # not 1: already destroyed, so not counted
+    assert meta.versions == frozenset({4, 5})
+    assert store.prune(ref, 2, mint(stores, "reconcile", ref)).versions == frozenset({4, 5})
+    assert len([item for item in vault.seen if "/destroy/" in item.url]) == 1  # second prune: nothing to do
+    with pytest.raises(stores.StoreError) as raised:
+        store.read(ref, 3, mint(stores, "probe", ref))
+    assert raised.value.code == "NOT_FOUND"
+
+
+def test_smoke_only_warns_when_destroy_is_not_permitted(vault, store, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(corporate, "log", type("L", (), {
+        "warning": staticmethod(lambda *a, **kw: warnings.append(a)), "info": staticmethod(lambda *a, **kw: None)}))
+    ref = new_ref(stores)
+    expected = {"read_canary": True, "list_denied": True, "foreign_tenant_denied": True, "write_without_cas_refused": True}
+    assert store.smoke(mint(stores, "smoke", ref)) == expected and warnings == []
+    vault.denied_kinds.add("destroy")
+    assert store.smoke(mint(stores, "smoke", ref)) == expected       # still passes: destroy is a warning, not a check
+    assert len(warnings) == 1 and "destroy" in warnings[0][0] and SECRET_TEXT not in repr(warnings)
+    probe = [item for item in vault.seen if "/destroy/" in item.url][-1]
+    assert probe.body == {"versions": [corporate._NO_SUCH_VERSION]}  # pylint: disable=W0212  # nothing real is destroyed
 
 
 # -- static lint -------------------------------------------------------------------------------

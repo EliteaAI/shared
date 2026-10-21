@@ -28,7 +28,9 @@ from pydantic import SecretStr  # pylint: disable=E0401
 
 from .authority import AuthorizedStoreContext, CredentialStoreProvider, OPERATION_PURPOSES, PURPOSES  # noqa: F401
 
-StoreCode = Literal["DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT"]
+StoreCode = Literal[
+    "DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT", "INVALID_REQUEST",
+]
 
 _MESSAGES = {
     "DENIED": "The secret store denied the operation.",
@@ -37,6 +39,7 @@ _MESSAGES = {
     "TLS_INVALID": "The secret store connection failed TLS validation.",
     "NOT_FOUND": "The secret was not found in the store.",
     "VERSION_CONFLICT": "The secret store version did not match the expected version.",
+    "INVALID_REQUEST": "The secret store request was invalid.",
 }
 
 
@@ -162,19 +165,30 @@ MAX_READ_MANY = 64  # refs per read_many call (one release batch is a handful of
 def plan_read_many(refs, generations, ctx):
     """ Validate a read_many call before any I/O; returns [(ref, generation, ctx)] without duplicate pairs.
 
-    Raises ValueError for malformed arguments (programming errors) and StoreError("DENIED") for a context
-    that does not fit its ref or the read purposes, so a refused batch has no store effect.
+    Malformed arguments (lengths, more than MAX_READ_MANY, a generation that is not an int >= 1) are
+    StoreError("INVALID_REQUEST"); oversize carries details={"max": MAX_READ_MANY}. A context that does not fit
+    its ref or the read purposes is DENIED, so a refused batch has no store effect. A repeated
+    (ref_id, generation) pair keeps its first context and must name the same project, else DENIED.
     """
-    refs, generations = list(refs), [int(item) for item in generations]
+    refs, generations = list(refs), list(generations)
     contexts = list(ctx) if isinstance(ctx, (list, tuple)) else [ctx] * len(refs)
-    if len(refs) != len(generations) or len(refs) != len(contexts) or len(refs) > MAX_READ_MANY:
-        raise ValueError("invalid read_many arguments")
-    planned, seen = [], set()
+    if len(refs) > MAX_READ_MANY:
+        raise StoreError("INVALID_REQUEST", {"max": MAX_READ_MANY})
+    if len(refs) != len(generations) or len(refs) != len(contexts):
+        raise StoreError("INVALID_REQUEST")
+    for ref, generation in zip(refs, generations):
+        if (not isinstance(ref, StoreRef) or type(generation) is not int  # pylint: disable=C0123
+                or generation < 1):
+            raise StoreError("INVALID_REQUEST")
+    planned, seen = [], {}
     for ref, generation, item_ctx in zip(refs, generations, contexts):
         check_context(item_ctx, ref, "read")
-        if (ref.ref_id, generation) not in seen:
-            seen.add((ref.ref_id, generation))
+        pair = (ref.ref_id, generation)
+        if pair not in seen:
+            seen[pair] = ref.project_id
             planned.append((ref, generation, item_ctx))
+        elif seen[pair] != ref.project_id:
+            raise StoreError("DENIED", {"ref_id": str(ref.ref_id)})
     return planned
 
 

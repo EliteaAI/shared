@@ -17,9 +17,10 @@
 Material lives in its OWN encrypted row ('<project db key>:cs' of secrets_data, same project key), so the
 legacy {{secret.*}} paths never decrypt it and a governed read never decrypts legacy secrets (C-1009 S10).
 
-Migration: a project that still has the pre-split 'credential_store' section inside its legacy blob is read
-from there; its FIRST mutation (write, prune or delete_all) moves the section into the new row in the same
-transaction. Reconcile can force it for a project by calling prune() for one of its references.
+Migration: the FIRST governed operation on a project (read, read_many, metadata, write, prune or delete_all)
+moves a pre-split 'credential_store' section out of the legacy blob into the new row, in one transaction
+under the legacy row lock. A read therefore does a one-time write for an unmigrated project; every later
+call is a single read of the new row. Deploy constraint: see secret_engines/database.py.
 """
 
 from collections import defaultdict

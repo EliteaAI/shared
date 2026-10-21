@@ -215,11 +215,23 @@ def test_read_many_argument_validation_and_empty_call(db, store):
     (ref,) = _seed(db, store, 1)
     ctx = mint(stores, "release", ref)
     assert store.read_many([], [], []) == {} and db.sessions == 0
-    for refs, generations, contexts in (([ref], [], ctx), ([ref], [1], [ctx, ctx]),
-                                        ([ref] * (stores.MAX_READ_MANY + 1), [1] * (stores.MAX_READ_MANY + 1), ctx)):
-        with pytest.raises(ValueError):
+    for refs, generations, contexts in (([ref], [], ctx), ([ref], [1], [ctx, ctx])):
+        with pytest.raises(stores.StoreError) as raised:
             store.read_many(refs, generations, contexts)
-    assert db.sessions == 0
+        assert raised.value.code == "INVALID_REQUEST" and raised.value.details == {}
+    too_many = stores.MAX_READ_MANY + 1
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([ref] * too_many, [1] * too_many, ctx)
+    assert raised.value.code == "INVALID_REQUEST" and raised.value.details == {"max": stores.MAX_READ_MANY}
+    assert len(store.read_many([ref] * stores.MAX_READ_MANY, [1] * stores.MAX_READ_MANY, ctx)) == 1  # limit is allowed
+    for bad in (True, 1.0, None, "1", 0, -1):
+        with pytest.raises(stores.StoreError) as raised:
+            store.read_many([ref], [bad], ctx)
+        assert raised.value.code == "INVALID_REQUEST"
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many(["not-a-ref"], [1], ctx)
+    assert raised.value.code == "INVALID_REQUEST"
+    assert db.sessions == 1  # only the limit-sized call above reached the database
 
 
 @pytest.mark.parametrize("purpose", sorted(stores.PURPOSES))
@@ -267,14 +279,45 @@ def test_governed_operations_never_touch_the_legacy_row_once_migrated(db, store)
         assert ("data", "project-1") not in db.touched
 
 
-def test_unmigrated_project_is_read_from_the_legacy_section_without_writing(db, store, decrypts):
+def test_first_read_migrates_an_unmigrated_project_once(db, store, decrypts):
+    # documented one-time write on a read path (S10 activation without waiting for a mutation)
     ref = new_ref(stores, 1)
     db.seed_legacy_governed(1, {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}})
-    db.sessions = 0
-    legacy_blob = db.raw(1)
+    db.commits = 0
     assert _plain(store.read(ref, 1, mint(stores, "probe", ref))) == {"api_key": "old-fixture"}
+    assert db.commits == 1 and db.decrypted(1) == {"secrets": {"keep": "kept"}, "hidden_secrets": {"h": "hidden"}}
+    assert db.decrypted(1, governed=True) == {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}}
+    db.touched.clear()
+    db.sessions = db.data_statements = 0
     assert store.metadata(ref, mint(stores, "probe", ref)).versions == frozenset({1})
-    assert db.raw(1) == legacy_blob and "project-1:cs" not in db.rows and db.commits == 0
+    assert db.commits == 1 and db.sessions == 1 and ("data", "project-1") not in db.touched  # steady state
+
+
+def test_metadata_also_migrates_and_a_project_without_governed_material_gets_an_empty_row(db, store):
+    ref = new_ref(stores, 1)
+    assert store.metadata(ref, mint(stores, "probe", ref)).current_version == 0
+    assert db.decrypted(1, governed=True) == {}
+    assert db.decrypted(1) == {"secrets": {"keep": "kept"}, "hidden_secrets": {"h": "hidden"}}
+
+
+@pytest.mark.parametrize("call", ["read", "read_many", "metadata"])
+def test_a_governed_read_is_one_data_statement(db, store, call):
+    # one SELECT over both candidate rows = one snapshot: a read cannot straddle a migration
+    (ref,) = _seed(db, store, 1)
+    db.data_statements = 0
+    ctx = mint(stores, "probe", ref)
+    {"read": lambda: store.read(ref, 1, ctx), "read_many": lambda: store.read_many([ref], [1], ctx),
+     "metadata": lambda: store.metadata(ref, ctx)}[call]()
+    assert db.data_statements == 1
+
+
+def test_a_read_of_an_unmigrated_project_sees_either_the_old_or_the_new_state_never_neither(db, store):
+    # the single statement returns the new row if it exists, else the legacy one: both carry the material
+    ref = new_ref(stores, 1)
+    db.seed_legacy_governed(1, {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}})
+    engine = _engine(db)
+    assert engine._read_governed() == {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}}  # pylint: disable=W0212
+    assert engine._read_governed() == {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}}  # pylint: disable=W0212
 
 
 def test_first_write_migrates_the_legacy_section_in_one_commit(db, store):
@@ -292,7 +335,7 @@ def test_first_write_migrates_the_legacy_section_in_one_commit(db, store):
     assert ("data", "project-1") not in db.touched
 
 
-def test_prune_and_delete_all_also_migrate_and_a_failed_check_rolls_the_migration_back(db, store):
+def test_prune_migrates_and_a_failed_check_rolls_the_migration_back(db, store):
     ref = new_ref(stores, 1)
     db.seed_legacy_governed(1, {f"{ref.ref_id.hex}:{n}": {"v": str(n)} for n in (1, 2, 3)})
     legacy_blob = db.raw(1)
@@ -352,7 +395,7 @@ def test_prune_purpose_matrix(db, store, purpose):
 
 def test_delete_all_of_nothing_writes_nothing(db, store):
     ref = new_ref(stores, 1)
-    db.seed_legacy_governed(1, {})  # already-migrated shape for this project: no references stored
+    db.seed_legacy_governed(1, {})  # an unmigrated project with no references: the first delete_all migrates it
     store.delete_all(ref, mint(stores, "retire", ref))
     first = db.commits
     store.delete_all(ref, mint(stores, "retire", ref))
@@ -365,3 +408,115 @@ def test_removing_the_project_space_removes_the_governed_row(db, store):
     assert "project-1:cs" in db.rows
     _engine(db).remove_project_space()
     assert "project-1" not in db.rows and "project-1:cs" not in db.rows and "project-1" not in db.keys
+
+
+# -- review fixes: typed argument errors, legacy writer guard, concurrency, failure injection ------------------
+
+
+def test_duplicate_pairs_keep_the_first_context_and_must_name_the_same_project(db, store):
+    first = new_ref(stores, 1)
+    store.write(first, stores.SecretValue({"a": "b"}, 1), expected_version=0, ctx=mint(stores, "onboard", first))
+    db.sessions = 0
+    twin = stores.StoreRef(first.ref_id, 2, "database", {})  # same ref_id and generation, another project
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([first, twin], [1, 1], [mint(stores, "release", first), mint(stores, "release", twin)])
+    assert raised.value.code == "DENIED" and raised.value.details == {"ref_id": str(first.ref_id)}
+    assert db.sessions == 0
+    ctx_a, ctx_b = mint(stores, "release", first, decision_id="first"), mint(stores, "probe", first, decision_id="second")
+    assert len(store.read_many([first, first], [1, 1], [ctx_a, ctx_b])) == 1
+
+
+def test_legacy_section_writers_refuse_credential_store_once_its_row_exists(db, store):
+    ref = new_ref(stores, 1)
+    engine = _engine(db)
+    engine._update_section("credential_store", add={"legacy": {"v": "1"}})  # pylint: disable=W0212  # before the split: fine
+    store.write(ref, stores.SecretValue({"a": "b"}, 1), expected_version=0, ctx=mint(stores, "onboard", ref))
+    database = db.install()
+    before = db.raw(1)
+    with pytest.raises(database.GovernedSectionMoved):
+        engine._update_section("credential_store", add={"legacy": {"v": "2"}})  # pylint: disable=W0212
+    with pytest.raises(database.GovernedSectionMoved):
+        engine._write_section("credential_store", {"legacy": {"v": "3"}})  # pylint: disable=W0212
+    assert db.raw(1) == before and "credential_store" not in db.decrypted(1)
+    engine.update_secrets(add={"other": "fine"})  # every other section is untouched by the guard
+    assert db.decrypted(1)["secrets"] == {"keep": "kept", "other": "fine"}
+
+
+def test_a_legacy_secret_edit_racing_the_migration_loses_nothing(db, store):
+    import threading  # pylint: disable=C0415
+    ref = new_ref(stores, 1)
+    db.seed_legacy_governed(1, {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}})
+    entered, release, errors = threading.Event(), threading.Event(), []
+
+    def migrate():
+        try:
+            _engine(db)._update_governed(lambda section: (entered.set(), release.wait(5)))  # pylint: disable=W0212
+        except Exception as exc:  # pylint: disable=W0703
+            errors.append(exc)
+
+    def edit():
+        try:
+            _engine(db).set_secrets({"edited": "value"})
+        except Exception as exc:  # pylint: disable=W0703
+            errors.append(exc)
+
+    migrator = threading.Thread(target=migrate)
+    migrator.start()
+    assert entered.wait(5)                      # the migration holds the legacy row lock, mid-transaction
+    editor = threading.Thread(target=edit)
+    editor.start()
+    editor.join(0.3)
+    assert editor.is_alive()                    # the legacy edit is blocked behind the lock
+    release.set()
+    migrator.join(5)
+    editor.join(5)
+    assert not errors and not migrator.is_alive() and not editor.is_alive()
+    assert db.decrypted(1) == {"secrets": {"edited": "value"}, "hidden_secrets": {"h": "hidden"}}
+    assert db.decrypted(1, governed=True) == {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}}
+
+
+def test_a_failed_commit_during_migration_leaves_legacy_and_governed_state_consistent(db, store):
+    ref = new_ref(stores, 1)
+    db.seed_legacy_governed(1, {f"{ref.ref_id.hex}:1": {"api_key": "old-fixture"}})
+    legacy_blob = db.raw(1)
+    db.fail_commit = True
+    with pytest.raises(stores.StoreError) as raised:
+        store.write(ref, stores.SecretValue({"api_key": "new"}, 2), expected_version=1, ctx=mint(stores, "onboard", ref))
+    assert raised.value.code == "UNAVAILABLE" and "injected" not in str(raised.value)
+    with pytest.raises(stores.StoreError):
+        store.read(ref, 1, mint(stores, "probe", ref))  # the read-side migration fails the same way
+    assert db.raw(1) == legacy_blob and "project-1:cs" not in db.rows        # nothing half-moved
+    db.fail_commit = False
+    assert _plain(store.read(ref, 1, mint(stores, "probe", ref))) == {"api_key": "old-fixture"}  # and it still works
+    assert "credential_store" not in db.decrypted(1)
+
+
+def test_a_failed_commit_after_migration_leaves_the_governed_row_unchanged(db, store):
+    (ref,) = _seed(db, store, 1)
+    before = db.raw(1, governed=True)
+    db.fail_commit = True
+    with pytest.raises(stores.StoreError):
+        store.write(ref, stores.SecretValue({"a": "b"}, 2), expected_version=1, ctx=mint(stores, "onboard", ref))
+    assert db.raw(1, governed=True) == before
+
+
+def test_write_and_metadata_are_one_session_each(db, store):
+    ref = new_ref(stores, 1)
+    store.metadata(ref, mint(stores, "probe", ref))  # migrates the (empty) project once
+    db.sessions = 0
+    store.write(ref, stores.SecretValue({"a": "b"}, 1), expected_version=0, ctx=mint(stores, "onboard", ref))
+    assert db.sessions == 1
+    db.sessions = 0
+    store.metadata(ref, mint(stores, "probe", ref))
+    assert db.sessions == 1
+    store.prune(ref, 1, mint(stores, "reconcile", ref))
+    assert db.sessions == 2
+
+
+def test_removing_a_project_locks_the_legacy_row_before_the_governed_row(db, store):
+    ref = new_ref(stores, 1)
+    store.write(ref, stores.SecretValue({"a": "b"}, 1), expected_version=0, ctx=mint(stores, "onboard", ref))
+    db.touched.clear()
+    _engine(db).remove_project_space()
+    data_order = [row_id for table, row_id in db.touched if table == "data"]
+    assert data_order == ["project-1", "project-1:cs"]
