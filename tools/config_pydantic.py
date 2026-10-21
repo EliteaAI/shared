@@ -83,6 +83,7 @@ class TheConfig(BaseSettings):
     CORPORATE_VAULT_CA_BUNDLE: Optional[str] = None
     CORPORATE_VAULT_TENANT_SEGMENT: Optional[str] = None
     CORPORATE_VAULT_TIMEOUT_S: Optional[int] = None
+    CORPORATE_VAULT_POOL_SIZE: Optional[int] = None
     CORPORATE_VAULT_INSECURE_DEV_HTTP: Optional[bool] = None
     STORAGE_ENGINE: str = "s3"
     STORAGE_FILESYSTEM_PATH: str = "/tmp/storage"

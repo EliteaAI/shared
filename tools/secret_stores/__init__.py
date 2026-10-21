@@ -22,13 +22,15 @@ import importlib
 import uuid
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal, Mapping, Protocol
+from typing import Literal, Mapping, Protocol, Sequence
 
 from pydantic import SecretStr  # pylint: disable=E0401
 
 from .authority import AuthorizedStoreContext, CredentialStoreProvider, OPERATION_PURPOSES, PURPOSES  # noqa: F401
 
-StoreCode = Literal["DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT"]
+StoreCode = Literal[
+    "DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT", "INVALID_REQUEST",
+]
 
 _MESSAGES = {
     "DENIED": "The secret store denied the operation.",
@@ -37,17 +39,20 @@ _MESSAGES = {
     "TLS_INVALID": "The secret store connection failed TLS validation.",
     "NOT_FOUND": "The secret was not found in the store.",
     "VERSION_CONFLICT": "The secret store version did not match the expected version.",
+    "INVALID_REQUEST": "The secret store request was invalid.",
 }
 
 
 class StoreError(Exception):
     """ Typed store failure. Fixed message per code: never a path, URL, body or client text """
 
-    def __init__(self, code):
+    def __init__(self, code, details=None):
         if code not in _MESSAGES:
             code = "UNAVAILABLE"
         self.code = code
         self.message = _MESSAGES[code]
+        # attribution only (e.g. {"ref_id": "<uuid>"} of the failing reference): never material, never in the message
+        self.details = dict(details or {})
         super().__init__(self.message)
 
     @property
@@ -56,7 +61,7 @@ class StoreError(Exception):
         return f"STORE_{self.code}"
 
     def __reduce__(self):
-        return (StoreError, (self.code,))
+        return (StoreError, (self.code, self.details))
 
 
 @dataclass(frozen=True)
@@ -120,12 +125,24 @@ class SecretStore(Protocol):
     def read(self, ref: StoreRef, generation: int, ctx: AuthorizedStoreContext) -> SecretValue:
         """ Material at one generation; NOT_FOUND if absent """
 
+    def read_many(self, refs: Sequence[StoreRef], generations: Sequence[int],
+                  ctx: "AuthorizedStoreContext | Sequence[AuthorizedStoreContext]"
+                  ) -> "dict[tuple[uuid.UUID, int], SecretValue]":
+        """ Material for refs[i] at generations[i], keyed (ref.ref_id, generation); same purposes as read.
+
+        ctx is one context per ref (parallel to refs), or a single context when every ref is its ref_id.
+        All-or-nothing: one failing ref fails the whole call (StoreError.details["ref_id"]), no partial material.
+        """
+
     def write(self, ref: StoreRef, value: SecretValue, *, expected_version: int,
               ctx: AuthorizedStoreContext) -> SecretMetadata:
         """ Compare-and-set: stores generation expected_version + 1, else VERSION_CONFLICT """
 
     def metadata(self, ref: StoreRef, ctx: AuthorizedStoreContext) -> SecretMetadata:
         """ Versions present (current_version 0 and no versions when nothing is stored) """
+
+    def prune(self, ref: StoreRef, keep_generations: int, ctx: AuthorizedStoreContext) -> SecretMetadata:
+        """ Drop all but the newest keep_generations (>= 1) generations; returns what remains """
 
     def delete_all(self, ref: StoreRef, ctx: AuthorizedStoreContext) -> None:
         """ Remove every generation of the reference (retire / orphan); idempotent """
@@ -139,7 +156,40 @@ def check_context(ctx, ref, operation):
             or ctx.project_id != ref.project_id
             or ctx.purpose not in OPERATION_PURPOSES[operation]
     ):
-        raise StoreError("DENIED")
+        raise StoreError("DENIED", {"ref_id": str(ref.ref_id)})
+
+
+MAX_READ_MANY = 64  # refs per read_many call (one release batch is a handful of slots)
+
+
+def plan_read_many(refs, generations, ctx):
+    """ Validate a read_many call before any I/O; returns [(ref, generation, ctx)] without duplicate pairs.
+
+    Malformed arguments (lengths, more than MAX_READ_MANY, a generation that is not an int >= 1) are
+    StoreError("INVALID_REQUEST"); oversize carries details={"max": MAX_READ_MANY}. A context that does not fit
+    its ref or the read purposes is DENIED, so a refused batch has no store effect. A repeated
+    (ref_id, generation) pair keeps its first context and must name the same project, else DENIED.
+    """
+    refs, generations = list(refs), list(generations)
+    contexts = list(ctx) if isinstance(ctx, (list, tuple)) else [ctx] * len(refs)
+    if len(refs) > MAX_READ_MANY:
+        raise StoreError("INVALID_REQUEST", {"max": MAX_READ_MANY})
+    if len(refs) != len(generations) or len(refs) != len(contexts):
+        raise StoreError("INVALID_REQUEST")
+    for ref, generation in zip(refs, generations):
+        if (not isinstance(ref, StoreRef) or type(generation) is not int  # pylint: disable=C0123
+                or generation < 1):
+            raise StoreError("INVALID_REQUEST")
+    planned, seen = [], {}
+    for ref, generation, item_ctx in zip(refs, generations, contexts):
+        check_context(item_ctx, ref, "read")
+        pair = (ref.ref_id, generation)
+        if pair not in seen:
+            seen[pair] = ref.project_id
+            planned.append((ref, generation, item_ctx))
+        elif seen[pair] != ref.project_id:
+            raise StoreError("DENIED", {"ref_id": str(ref.ref_id)})
+    return planned
 
 
 def get_store(store_kind: str, *, governed: bool) -> SecretStore:

@@ -4,6 +4,7 @@ import json
 import pickle
 import sys
 import traceback
+from pathlib import Path
 import uuid
 
 import pytest
@@ -13,6 +14,7 @@ from fixtures.secret_stores_loader import load_secret_stores, mint, new_ref
 stores = load_secret_stores()
 FAKE_VALUE = "value-fixture-not-a-credential"
 CORPORATE_MODULE = f"{stores.__name__}.corporate_vault"
+CORPORATE_MODULE_FILE = Path(stores.__file__).parent / "corporate_vault.py"
 
 
 @pytest.fixture(name="config")
@@ -76,7 +78,7 @@ def test_store_ref_repr_omits_locator_and_is_not_picklable():
         json.dumps(ref)
 
 
-@pytest.mark.parametrize("code", ["DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT"])
+@pytest.mark.parametrize("code", ["DENIED", "SEALED", "UNAVAILABLE", "TLS_INVALID", "NOT_FOUND", "VERSION_CONFLICT", "INVALID_REQUEST"])
 def test_store_error_has_fixed_message_per_code(code):
     err = stores.StoreError(code)
     assert err.code == code and err.audit_code == f"STORE_{code}"
@@ -213,3 +215,46 @@ def test_errors_raised_by_factory_do_not_leak_config(config, monkeypatch):
         stores.get_store("corporate_vault", governed=False)
     text = "".join(traceback.format_exception(raised.value))
     assert "vault-secret-host" not in text
+
+
+def test_store_error_details_are_attribution_only_and_survive_pickling():
+    err = stores.StoreError("NOT_FOUND", {"ref_id": "11111111-1111-1111-1111-111111111111"})
+    assert err.details == {"ref_id": "11111111-1111-1111-1111-111111111111"}
+    assert "1111" not in str(err) and "1111" not in repr(err.args)  # the message stays fixed per code
+    clone = pickle.loads(pickle.dumps(err))
+    assert (clone.code, clone.details) == ("NOT_FOUND", err.details)
+    assert stores.StoreError("DENIED").details == {}
+    err.details["x"] = "y"
+    assert stores.StoreError("DENIED").details == {}  # no shared default
+
+
+def test_every_corporate_vault_key_the_adapter_reads_is_declared_in_both_config_files():
+    import ast  # pylint: disable=C0415
+    import re  # pylint: disable=C0415
+    tools_dir = Path(CORPORATE_MODULE_FILE).parent.parent
+    adapter = Path(CORPORATE_MODULE_FILE).read_text(encoding="utf-8")
+    wanted = {f"CORPORATE_VAULT_{name}" for name in re.findall(r'get\("([A-Z_]+)"\)', adapter)}
+    wanted |= {f"CORPORATE_VAULT_{name}" for name in re.findall(r'^    "([A-Z_]+)": ', adapter, re.M)}
+    assert {"CORPORATE_VAULT_POOL_SIZE", "CORPORATE_VAULT_ADDR", "CORPORATE_VAULT_TIMEOUT_S"} <= wanted
+    #
+    settings = {  # (name, type, default) tuples of the real settings table in config.py
+        node.elts[0].value: node.elts[1].value
+        for node in ast.walk(ast.parse((tools_dir / "config.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.Tuple) and len(node.elts) == 3
+        and all(isinstance(item, ast.Constant) for item in node.elts[:2])
+        and str(node.elts[0].value).startswith("CORPORATE_VAULT_")
+    }
+    fields = {
+        node.target.id: ast.unparse(node.annotation)
+        for node in ast.walk(ast.parse((tools_dir / "config_pydantic.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        and node.target.id.startswith("CORPORATE_VAULT_")
+    }
+    assert wanted <= set(settings), wanted - set(settings)
+    assert wanted <= set(fields), wanted - set(fields)
+    assert settings["CORPORATE_VAULT_POOL_SIZE"] == "int" and fields["CORPORATE_VAULT_POOL_SIZE"] == "Optional[int]"
+
+
+def test_invalid_request_is_a_fixed_typed_code():
+    err = stores.StoreError("INVALID_REQUEST", {"max": 64})
+    assert err.audit_code == "STORE_INVALID_REQUEST" and err.details == {"max": 64} and "64" not in str(err)

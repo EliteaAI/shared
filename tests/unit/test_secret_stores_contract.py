@@ -119,6 +119,7 @@ OPERATIONS = {
     "read": lambda store, ref, ctx: store.read(ref, 1, ctx),
     "write": lambda store, ref, ctx: store.write(ref, _value(1), expected_version=0, ctx=ctx),
     "metadata": lambda store, ref, ctx: store.metadata(ref, ctx),
+    "prune": lambda store, ref, ctx: store.prune(ref, 1, ctx),
     "delete_all": lambda store, ref, ctx: store.delete_all(ref, ctx),
 }
 
@@ -171,3 +172,99 @@ def test_refused_context_causes_no_store_effect(env):
     assert store.metadata(ref, mint(stores, "probe", ref)).current_version == 0
     if kind == "corporate_vault":
         assert backend.requests_to("/data/") == [] or all(r.method != "POST" for r in backend.requests_to("/data/"))
+
+
+# -- read_many / prune (perf PR 1) --------------------------------------------------------------
+
+
+def _stored(store, kind, project_id, count, generations=1):
+    refs = []
+    for index in range(count):
+        ref = new_ref(stores, project_id, kind)
+        for generation in range(1, generations + 1):
+            store.write(ref, _value(generation, n=f"{index}.{generation}"), expected_version=generation - 1,
+                        ctx=mint(stores, "onboard", ref))
+        refs.append(ref)
+    return refs
+
+
+def test_read_many_returns_what_read_returns_for_every_pair(env):
+    store, kind, project_id, _ = env
+    first, second = _stored(store, kind, project_id, 2, generations=2)
+    refs, generations = [first, second, first], [1, 2, 2]
+    found = store.read_many(refs, generations, [mint(stores, "release", ref) for ref in refs])
+    assert sorted(found) == sorted({(first.ref_id, 1), (second.ref_id, 2), (first.ref_id, 2)})
+    for (ref_id, generation), value in found.items():
+        ref = first if ref_id == first.ref_id else second
+        assert value.generation == generation
+        assert _plain(value) == _plain(store.read(ref, generation, mint(stores, "probe", ref)))
+    assert _plain(found[(second.ref_id, 2)]) == {"n": "1.2"}
+
+
+def test_read_many_is_all_or_nothing_and_names_the_failing_ref(env):
+    store, kind, project_id, _ = env
+    ok, missing = _stored(store, kind, project_id, 2)
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([ok, missing], [1, 7], [mint(stores, "release", ok), mint(stores, "release", missing)])
+    assert raised.value.code == "NOT_FOUND" and raised.value.details == {"ref_id": str(missing.ref_id)}
+    assert "fixture" not in repr(raised.value.details) and str(missing.ref_id) not in str(raised.value)
+
+
+def test_read_many_of_nothing_is_empty(env):
+    store, _kind, _project_id, _ = env
+    assert store.read_many([], [], []) == {}
+
+
+@pytest.mark.parametrize("purpose", sorted(stores.PURPOSES))
+def test_read_many_purposes_are_the_read_purposes(env, purpose):
+    store, kind, project_id, _ = env
+    (ref,) = _stored(store, kind, project_id, 1)
+    ctx = mint(stores, purpose, ref)
+    if purpose in stores.OPERATION_PURPOSES["read"]:
+        assert store.read_many([ref], [1], ctx)[(ref.ref_id, 1)].generation == 1
+    else:
+        with pytest.raises(stores.StoreError) as raised:
+            store.read_many([ref], [1], ctx)
+        assert raised.value.code == "DENIED" and raised.value.details == {"ref_id": str(ref.ref_id)}
+
+
+def test_read_many_refused_context_causes_no_read(env):
+    store, kind, project_id, backend = env
+    first, second = _stored(store, kind, project_id, 2)
+    if kind == "corporate_vault":
+        before = len(backend.seen)
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([first, second], [1, 1], mint(stores, "release", first))  # one ctx, two refs
+    assert raised.value.code == "DENIED"
+    if kind == "corporate_vault":
+        assert len(backend.seen) == before
+
+
+def test_prune_keeps_the_newest_n_generations_of_one_reference(env):
+    store, kind, project_id, _ = env
+    ref, other = _stored(store, kind, project_id, 2, generations=4)
+    meta = store.prune(ref, 2, mint(stores, "reconcile", ref))
+    assert meta.versions == frozenset({3, 4}) and meta.current_version == 4
+    assert store.metadata(ref, mint(stores, "probe", ref)).versions == frozenset({3, 4})
+    assert store.metadata(other, mint(stores, "probe", other)).versions == frozenset({1, 2, 3, 4})
+    with pytest.raises(stores.StoreError) as raised:
+        store.read(ref, 2, mint(stores, "probe", ref))
+    assert raised.value.code == "NOT_FOUND"
+    assert _plain(store.read(ref, 4, mint(stores, "probe", ref))) == {"n": "0.4"}
+    assert store.prune(ref, 2, mint(stores, "retire", ref)).versions == frozenset({3, 4})  # idempotent
+
+
+def test_prune_of_an_unknown_reference_is_empty_not_an_error(env):
+    store, kind, project_id, _ = env
+    ref = new_ref(stores, project_id, kind)
+    meta = store.prune(ref, 1, mint(stores, "reconcile", ref))
+    assert meta.current_version == 0 and meta.versions == frozenset()
+
+
+@pytest.mark.parametrize("keep", [0, -1, True, 2.0, "2", None])
+def test_prune_rejects_a_bad_keep_count(env, keep):
+    store, kind, project_id, _ = env
+    (ref,) = _stored(store, kind, project_id, 1, generations=2)
+    with pytest.raises(ValueError):
+        store.prune(ref, keep, mint(stores, "reconcile", ref))
+    assert store.metadata(ref, mint(stores, "probe", ref)).versions == frozenset({1, 2})

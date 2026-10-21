@@ -146,6 +146,7 @@ class Config(metaclass=SingletonABC):  # pylint: disable=R0903
                 ("CORPORATE_VAULT_CA_BUNDLE", "str", None),
                 ("CORPORATE_VAULT_TENANT_SEGMENT", "str", None),
                 ("CORPORATE_VAULT_TIMEOUT_S", "int", None),  # default 5
+                ("CORPORATE_VAULT_POOL_SIZE", "int", None),  # default 8 (idle keep-alive connections, 1..64)
                 ("CORPORATE_VAULT_INSECURE_DEV_HTTP", "bool", None),  # http only for localhost, *.localhost, 127.0.0.1
                 ("STORAGE_ENGINE", "str", "s3"),
                 ("STORAGE_FILESYSTEM_PATH", "str", "/tmp/storage"),
