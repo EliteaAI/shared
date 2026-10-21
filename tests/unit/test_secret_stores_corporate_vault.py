@@ -465,6 +465,178 @@ def test_get_store_does_not_cache_a_failed_construction(monkeypatch, tmp_path):
     _ = tmp_path
 
 
+# -- read_many / shared connection pool / prune (perf PR 1) ---------------------------------------
+
+
+def _stored(store, count, generations=1):
+    refs = []
+    for index in range(count):
+        ref = new_ref(stores, 1, "corporate_vault")
+        for generation in range(1, generations + 1):
+            store.write(ref, _value(n=f"{index}.{generation}"), expected_version=generation - 1,
+                        ctx=mint(stores, "onboard", ref))
+        refs.append(ref)
+    return refs
+
+
+def test_read_many_of_six_refs_is_six_gets_over_one_session_one_login(vault, store):
+    refs = _stored(store, 6)
+    sessions_before, logins_before, gets_before = len(vault.sessions), vault.logins, len(vault.requests_to("/data/"))
+    ctxs = [mint(stores, "release", ref, decision_id=f"decision-fixture-{n}") for n, ref in enumerate(refs)]
+    found = store.read_many(refs, [1] * 6, ctxs)
+    assert len(vault.sessions) - sessions_before == 1                  # one Session() for the whole batch
+    assert vault.logins == logins_before                                 # token cached: no login at all
+    reads = vault.requests_to("/data/")[gets_before:]
+    assert [item.method for item in reads] == ["GET"] * 6
+    assert [item.headers["X-Correlation-Id"] for item in reads] == [f"decision-fixture-{n}" for n in range(6)]
+    assert sorted(found) == sorted((ref.ref_id, 1) for ref in refs)
+
+
+def test_read_is_a_thin_wrapper_one_session_one_get(vault, store):
+    (ref,) = _stored(store, 1)
+    sessions_before, gets_before = len(vault.sessions), len(vault.requests_to("/data/"))
+    ctx = mint(stores, "probe", ref, decision_id="decision-fixture-9")
+    assert store.read(ref, 1, ctx).generation == 1
+    assert len(vault.sessions) - sessions_before == 1
+    (item,) = vault.requests_to("/data/")[gets_before:]
+    assert item.headers["X-Correlation-Id"] == "decision-fixture-9"
+
+
+def test_read_many_names_the_failing_ref_for_missing_and_forbidden(vault, store):
+    ok, missing = _stored(store, 2)
+    ctxs = [mint(stores, "release", ok), mint(stores, "release", missing)]
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([ok, missing], [1, 5], ctxs)
+    assert raised.value.code == "NOT_FOUND" and raised.value.details == {"ref_id": str(missing.ref_id)}
+    vault.fail_next(status=500, errors=["boom-fixture"])  # fault applies to the first KV request of the call
+    with pytest.raises(stores.StoreError) as raised:
+        store.read_many([ok, missing], [1, 1], ctxs)
+    assert raised.value.code == "UNAVAILABLE" and raised.value.details == {"ref_id": str(ok.ref_id)}
+    assert "boom-fixture" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_read_many_relogs_in_once_on_a_stale_token_and_still_uses_one_session(vault, store):
+    refs = _stored(store, 3)
+    vault.valid_tokens.clear()  # every cached token is now stale -> first GET is 403
+    sessions_before = len(vault.sessions)
+    found = store.read_many(refs, [1] * 3, [mint(stores, "release", ref) for ref in refs])
+    assert len(found) == 3 and len(vault.sessions) - sessions_before == 1
+
+
+def test_pool_size_defaults_to_eight_and_is_configurable_and_validated(vault, make):
+    _ = vault
+    with pytest.MonkeyPatch.context() as patch:  # the fixture replaced HTTPAdapter with the fake: use the real class
+        patch.setattr(requests.adapters, "HTTPAdapter", _REAL_ADAPTER)
+        assert make()._adapter._pool_maxsize == 8  # pylint: disable=W0212
+        assert make(POOL_SIZE=3)._adapter._pool_maxsize == 3  # pylint: disable=W0212
+        assert make(POOL_SIZE="16")._adapter._pool_maxsize == 16  # pylint: disable=W0212
+        for bad in (0, 65, "x", -1):
+            with pytest.raises(stores.StoreError) as raised:
+                make(POOL_SIZE=bad)
+            assert raised.value.code == "UNAVAILABLE"
+
+
+_REAL_ADAPTER = requests.adapters.HTTPAdapter
+
+
+class _KvServer:
+    """ Real loopback HTTP/1.1 keep-alive server: login + KV v2 reads; counts TCP connections and requests """
+
+    def __init__(self, bundles):
+        import http.server  # pylint: disable=C0415
+        import threading  # pylint: disable=C0415
+        outer = self
+        self.requests, self.connections = [], 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, body):
+                raw = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):  # login
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                outer.requests.append(("POST", self.path))
+                self._reply({"auth": {"client_token": "token-fixture", "lease_duration": 3600}})
+
+            def do_GET(self):
+                outer.requests.append(("GET", self.path))
+                path, _, query = self.path.partition("?")
+                version = int(query.split("version=")[1].split("&")[0])
+                self._reply({"data": {"data": bundles[path.rsplit("/", 1)[1]],
+                                      "metadata": {"version": version}}})
+
+        class Server(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+
+            def get_request(self):
+                request = super().get_request()
+                outer.connections += 1
+                return request
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_connections_are_reused_across_reads_and_calls(tmp_path):
+    # real sockets, real requests/urllib3 pool: the shared adapter keeps the TCP connection alive
+    refs = [new_ref(stores, 1, "corporate_vault") for _ in range(6)]
+    kv = _KvServer({str(ref.ref_id): {"api_key": SECRET_TEXT} for ref in refs})
+    try:
+        store = corporate.CorporateVaultSecretStore(
+            vault_config(tmp_path, ADDR=kv.url, INSECURE_DEV_HTTP=True))
+        ctxs = [mint(stores, "release", ref) for ref in refs]
+        assert len(store.read_many(refs, [1] * 6, ctxs)) == 6
+        assert kv.connections == 1                                       # login + 6 GETs on ONE connection
+        assert len([r for r in kv.requests if r[0] == "GET"]) == 6 and len(kv.requests) == 7
+        assert len(store.read_many(refs, [1] * 6, ctxs)) == 6
+        store.read(refs[0], 1, mint(stores, "probe", refs[0]))
+        assert kv.connections == 1                                       # and across later calls (no close())
+    finally:
+        kv.close()
+
+
+def test_prune_destroys_all_but_the_newest_versions_over_one_session(vault, store):
+    ref, other = _stored(store, 2, generations=4)
+    sessions_before = len(vault.sessions)
+    meta = store.prune(ref, 2, mint(stores, "reconcile", ref))
+    assert len(vault.sessions) - sessions_before == 1
+    assert meta.versions == frozenset({3, 4}) and meta.current_version == 4
+    (destroy,) = [item for item in vault.seen if "/destroy/" in item.url]
+    assert destroy.method == "POST" and destroy.body == {"versions": [1, 2]}
+    assert destroy.url.endswith(f"/destroy/t/local/cred/{ref.ref_id}")
+    assert store.metadata(other, mint(stores, "probe", other)).versions == frozenset({1, 2, 3, 4})
+
+
+def test_prune_with_nothing_older_makes_no_destroy_call(vault, store):
+    (ref,) = _stored(store, 1, generations=2)
+    assert store.prune(ref, 2, mint(stores, "reconcile", ref)).versions == frozenset({1, 2})
+    assert not [item for item in vault.seen if "/destroy/" in item.url]
+
+
+def test_prune_destroy_redirect_is_not_success(vault, store):
+    (ref,) = _stored(store, 1, generations=3)
+    vault.faults.append(lambda request: response(200, {"data": {
+        "current_version": 3, "versions": {"1": {}, "2": {}, "3": {}}}}, request.url))
+    vault.fail_next(status=307, errors=[], headers={"Location": "https://elsewhere.invalid/"})
+    with pytest.raises(stores.StoreError) as raised:
+        store.prune(ref, 1, mint(stores, "reconcile", ref))
+    assert raised.value.code == "UNAVAILABLE"
+
+
 # -- static lint -------------------------------------------------------------------------------
 
 FORBIDDEN = {
@@ -506,11 +678,11 @@ def test_only_the_designed_hvac_calls_are_used():
     attributes = {node.attr for node in ast.walk(_tree()) if isinstance(node, ast.Attribute)}
     used = attributes & {
         "read_secret_version", "create_or_update_secret", "read_secret_metadata",
-        "delete_metadata_and_all_versions", "list_secrets", "jwt_login", "login",
+        "delete_metadata_and_all_versions", "list_secrets", "jwt_login", "login", "destroy_secret_versions",
     }
     assert used == {
         "read_secret_version", "create_or_update_secret", "read_secret_metadata",
-        "delete_metadata_and_all_versions", "list_secrets", "jwt_login", "login",
+        "delete_metadata_and_all_versions", "list_secrets", "jwt_login", "login", "destroy_secret_versions",
     }
 
 

@@ -26,6 +26,7 @@ OPERATION_PURPOSES = {
     "read": frozenset({"probe", "reconcile", "smoke", "release"}),
     "write": frozenset({"onboard"}),
     "metadata": frozenset({"probe", "reconcile", "smoke"}),
+    "prune": frozenset({"retire", "reconcile"}),
     "delete_all": frozenset({"retire", "reconcile"}),
 }
 

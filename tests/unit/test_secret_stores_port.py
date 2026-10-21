@@ -213,3 +213,14 @@ def test_errors_raised_by_factory_do_not_leak_config(config, monkeypatch):
         stores.get_store("corporate_vault", governed=False)
     text = "".join(traceback.format_exception(raised.value))
     assert "vault-secret-host" not in text
+
+
+def test_store_error_details_are_attribution_only_and_survive_pickling():
+    err = stores.StoreError("NOT_FOUND", {"ref_id": "11111111-1111-1111-1111-111111111111"})
+    assert err.details == {"ref_id": "11111111-1111-1111-1111-111111111111"}
+    assert "1111" not in str(err) and "1111" not in repr(err.args)  # the message stays fixed per code
+    clone = pickle.loads(pickle.dumps(err))
+    assert (clone.code, clone.details) == ("NOT_FOUND", err.details)
+    assert stores.StoreError("DENIED").details == {}
+    err.details["x"] = "y"
+    assert stores.StoreError("DENIED").details == {}  # no shared default

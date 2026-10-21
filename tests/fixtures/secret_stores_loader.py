@@ -43,11 +43,16 @@ class _Row:  # pylint: disable=too-few-public-methods
 
 
 class _Query:
-    def __init__(self, db, model):
-        self._db, self._model, self._id = db, model, None
+    def __init__(self, session, model):
+        self._session, self._model, self._id = session, model, None
+
+    @property
+    def _table(self):
+        db = self._session.db
+        return db.keys if self._model.__name__ == "SecretsKey" else db.rows
 
     def get(self, row_id):
-        return (self._db.keys if self._model.__name__ == "SecretsKey" else self._db.rows).get(row_id)
+        return self._session.touch(self._table, row_id)
 
     def filter(self, condition):
         self._id = condition[1]
@@ -56,22 +61,55 @@ class _Query:
     def with_for_update(self):
         return self
 
+    def one_or_none(self):
+        return self._session.touch(self._table, self._id)
+
     def one(self):
-        return self._db.rows[self._id]
+        row = self.one_or_none()
+        if row is None:
+            raise KeyError(self._id)
+        return row
 
 
 class _Session:
+    """ Transactional enough for the adapters: rollback restores data/adds/deletes; touched ids are recorded """
+
     def __init__(self, db):
-        self._db = db
+        self.db = db
+        self._restore, self._added, self._deleted = [], [], []
+        db.sessions += 1
+
+    def touch(self, table, row_id):
+        self.db.touched.append(("key" if table is self.db.keys else "data", row_id))
+        row = table.get(row_id)
+        if row is not None:
+            self._restore.append((row, row.data))
+        return row
 
     def query(self, model):
-        return _Query(self._db, model)
+        return _Query(self, model)
+
+    def add(self, obj):
+        self._added.append(obj)
+
+    def delete(self, obj):
+        self._deleted.append(obj)
 
     def commit(self):
-        self._db.commits += 1
+        self.db.commits += 1
+        for obj in self._added:
+            self.db.rows[obj.id] = obj
+        for obj in self._deleted:
+            for table in (self.db.rows, self.db.keys):
+                for row_id in [k for k, v in table.items() if v is obj]:
+                    del table[row_id]
+        self._restore, self._added, self._deleted = [], [], []
 
     def rollback(self):
-        self._db.rollbacks += 1
+        self.db.rollbacks += 1
+        for row, data in reversed(self._restore):
+            row.data = data
+        self._restore, self._added, self._deleted = [], [], []
 
     def __enter__(self):
         return self
@@ -81,11 +119,16 @@ class _Session:
 
 
 class FakeSecretsDb:
-    """ SecretsKey/SecretsData rows with real Fernet; one row per project id """
+    """ SecretsKey/SecretsData rows with real Fernet; one row per project id.
+
+    Counters: sessions (make_session calls), commits, rollbacks; touched = every (table, row id) looked up, in order, table being 'key' or 'data'.
+    """
 
     def __init__(self, project_ids=(1, 2)):
         self.commits = 0
         self.rollbacks = 0
+        self.sessions = 0
+        self.touched = []
         self.keys, self.rows = {}, {}
         for project_id in project_ids:
             key = Fernet.generate_key()
@@ -107,12 +150,20 @@ class FakeSecretsDb:
         data = self.decrypted(project_id)
         return data.get(name)
 
-    def decrypted(self, project_id):
+    def decrypted(self, project_id, governed=False):
         db_key = f"project-{project_id}"
-        return json.loads(self._fernet[db_key].decrypt(self.rows[db_key].data).decode())
+        row = self.rows[f"{db_key}:cs" if governed else db_key]
+        return json.loads(self._fernet[db_key].decrypt(row.data).decode())
 
-    def raw(self, project_id):
-        return self.rows[f"project-{project_id}"].data
+    def raw(self, project_id, governed=False):
+        return self.rows[f"project-{project_id}" + (":cs" if governed else "")].data
+
+    def seed_legacy_governed(self, project_id, section):
+        """ Put a pre-split 'credential_store' section into the legacy blob (an unmigrated project) """
+        db_key = f"project-{project_id}"
+        data = self.decrypted(project_id)
+        data["credential_store"] = section
+        self.rows[db_key].data = self._fernet[db_key].encrypt(json.dumps(data).encode())
 
 
 # -- Vault fake --------------------------------------------------------------------------------
@@ -208,6 +259,12 @@ class FakeVault(requests.adapters.BaseAdapter):  # pylint: disable=R0902
                 "current_version": entry["current"],
                 "versions": {str(n): {"deletion_time": "", "destroyed": False} for n in entry["versions"]}}},
                 request.url)
+        if kind == "destroy" and request.method == "POST":
+            if entry is None:
+                return response(404, {"errors": []}, request.url)
+            for number in body.get("versions") or ():
+                entry["versions"].pop(int(number), None)
+            return response(204, None, request.url)
         if kind == "metadata" and request.method == "DELETE":
             if entry is None:
                 return response(404, {"errors": []}, request.url)
@@ -217,9 +274,11 @@ class FakeVault(requests.adapters.BaseAdapter):  # pylint: disable=R0902
 
 
 def install_fake_vault(monkeypatch, vault):
-    """ Make every requests.Session() created by the adapter talk to `vault`; returns created sessions """
+    """ Make every requests.Session() (and the shared HTTPAdapter) created by the adapter talk to `vault`; returns sessions """
     sessions = []
     real_session = requests.Session
+    # the adapter mounts its own shared pool adapter on every session: make that one the fake too
+    monkeypatch.setattr(requests.adapters, "HTTPAdapter", lambda *args, **kwargs: vault)
 
     def factory():
         session = real_session()

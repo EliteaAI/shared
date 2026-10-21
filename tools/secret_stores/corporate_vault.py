@@ -29,7 +29,7 @@ import requests  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0401
 
-from . import SecretMetadata, SecretValue, StoreError, check_context
+from . import SecretMetadata, SecretValue, StoreError, check_context, plan_read_many
 from .authority import AuthorizedStoreContext
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -46,6 +46,7 @@ _DEFAULTS = {
     "ROLE": "elitea-main",
     "JWT_PATH": "/var/run/secrets/vault/token",
     "TIMEOUT_S": 5,
+    "POOL_SIZE": 8,
 }
 
 
@@ -106,6 +107,17 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         if not 0 < self._timeout <= 60:
             raise invalid("TIMEOUT_S")
         self._verify = get("CA_BUNDLE") or True
+        try:
+            pool_size = int(get("POOL_SIZE"))
+        except (TypeError, ValueError):
+            raise invalid("POOL_SIZE") from None
+        if not 1 <= pool_size <= 64:
+            raise invalid("POOL_SIZE")
+        # one adapter = one urllib3 pool for the process: keep-alive and TLS sessions survive across calls
+        # (sessions stay per call for header isolation and must never be close()d: that closes this pool)
+        self._adapter = requests.adapters.HTTPAdapter(
+            pool_connections=1, pool_maxsize=pool_size, max_retries=0, pool_block=False,
+        )
         #
         self._lock = threading.Lock()
         self._token = None
@@ -115,7 +127,9 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
     # -- transport ------------------------------------------------------------------------------
 
     def _session(self, ctx):
-        session = requests.Session()  # one per call
+        session = requests.Session()  # one per call (headers are per decision); the pool is shared
+        for prefix in ("https://", "http://"):
+            session.mount(prefix, self._adapter)
         session.trust_env = False
         session.max_redirects = 0
         session.proxies = {}
@@ -162,8 +176,11 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
         with self._lock:
             self._token = None
 
-    def _call(self, ctx, operation, relogin=True):
-        """ Run operation(client) with a session-scoped client; maps every failure to StoreError """
+    def _call(self, ctx, operation, relogin=True, details=None):
+        """ Run operation(client) with a session-scoped client; maps every failure to StoreError.
+
+        details is an optional dict the operation keeps current (e.g. the ref_id in flight): it rides on the error.
+        """
         session = self._session(ctx)
         try:
             fresh = False
@@ -184,9 +201,8 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
             raise
         except Exception as exc:  # pylint: disable=W0703
             code = _error_code(exc)
-        finally:
-            session.close()
-        raise StoreError(code) from None
+        # no session.close(): it would close the shared adapter's pool; the session is simply dropped
+        raise StoreError(code, details) from None
 
     def _path(self, ref_id):
         return f"t/{self._tenant}/cred/{ref_id}"
@@ -194,19 +210,37 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
     # -- port -----------------------------------------------------------------------------------
 
     def read(self, ref, generation, ctx):
-        check_context(ctx, ref, "read")
-        generation = int(generation)
-        reply = self._call(ctx, lambda client: client.secrets.kv.v2.read_secret_version(
+        return self.read_many([ref], [generation], ctx)[(ref.ref_id, int(generation))]
+
+    def read_many(self, refs, generations, ctx):
+        """ N KV GETs over ONE session, client and token check; all-or-nothing """
+        planned = plan_read_many(refs, generations, ctx)
+        if not planned:
+            return {}
+        details = {}
+        #
+        def operation(client):
+            found = {}
+            for ref, generation, item_ctx in planned:
+                details["ref_id"] = str(ref.ref_id)
+                client.adapter.session.headers["X-Correlation-Id"] = item_ctx.decision_id
+                found[(ref.ref_id, generation)] = self._read_version(client, ref, generation)
+            return found
+        #
+        return self._call(planned[0][2], operation, details=details)
+
+    def _read_version(self, client, ref, generation):
+        reply = client.secrets.kv.v2.read_secret_version(
             path=self._path(ref.ref_id), version=generation, mount_point=self._mount,
             raise_on_deleted_version=True,
-        ))
+        )
         data = _body(reply).get("data") or {}
         bundle = data.get("data")
         if bundle is None:
-            raise StoreError("NOT_FOUND")
+            raise StoreError("NOT_FOUND", {"ref_id": str(ref.ref_id)})
         if (data.get("metadata") or {}).get("version") != generation or not all(
                 isinstance(value, str) for value in bundle.values()):
-            raise StoreError("UNAVAILABLE")
+            raise StoreError("UNAVAILABLE", {"ref_id": str(ref.ref_id)})
         return SecretValue(bundle, generation)
 
     def write(self, ref, value, *, expected_version, ctx):
@@ -244,6 +278,35 @@ class CorporateVaultSecretStore:  # pylint: disable=R0902
             current_version=int(data.get("current_version") or 0), versions=versions,
             request_id=body.get("request_id"),
         )
+
+    def prune(self, ref, keep_generations, ctx):
+        """ Destroy all but the newest keep_generations (>= 1) KV versions (needs update on <mount>/destroy/...) """
+        check_context(ctx, ref, "prune")
+        if isinstance(keep_generations, bool) or not isinstance(keep_generations, int) or keep_generations < 1:
+            raise ValueError("keep_generations must be an integer >= 1")
+        #
+        def operation(client):
+            kv2 = client.secrets.kv.v2
+            data = _body(kv2.read_secret_metadata(path=self._path(ref.ref_id), mount_point=self._mount)).get("data") or {}
+            present = sorted(
+                int(number) for number, info in (data.get("versions") or {}).items()
+                if not info.get("destroyed") and not info.get("deletion_time")
+            )
+            doomed = present[:-keep_generations]
+            if doomed:
+                reply = kv2.destroy_secret_versions(
+                    path=self._path(ref.ref_id), versions=doomed, mount_point=self._mount)
+                if getattr(reply, "status_code", 204) not in (200, 204):  # e.g. an unfollowed redirect
+                    raise StoreError("UNAVAILABLE")
+            return int(data.get("current_version") or 0), frozenset(present[-keep_generations:])
+        #
+        try:
+            current, versions = self._call(ctx, operation)
+        except StoreError as exc:
+            if exc.code == "NOT_FOUND":  # nothing stored: nothing to prune
+                return SecretMetadata(current_version=0, versions=frozenset())
+            raise
+        return SecretMetadata(current_version=current, versions=versions)
 
     def delete_all(self, ref, ctx):
         check_context(ctx, ref, "delete_all")
