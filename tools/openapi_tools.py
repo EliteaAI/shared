@@ -291,6 +291,7 @@ class OpenAPIRegistry:
         name: str,
         description: str = "",
         mcp_description: str = "",
+        summary: str = "",
         tags: Optional[List[str]] = None,
         parameters: Optional[List[Dict]] = None,
         request_body: Optional[Type[BaseModel]] = None,
@@ -321,6 +322,7 @@ class OpenAPIRegistry:
             "name": name,
             "description": description,
             "mcp_description": mcp_description,
+            "summary": summary,
             "tags": tags or [plugin_name],
             "parameters": parameters or [],
             "request_body": request_body,
@@ -452,6 +454,9 @@ class OpenAPIRegistry:
                     "500": {"description": "Server error"},
                 },
             }
+
+            if endpoint.get("summary"):
+                operation["summary"] = endpoint["summary"]
 
             if endpoint["deprecated"]:
                 operation["deprecated"] = True
@@ -658,6 +663,7 @@ def register_openapi(
     name: str,
     description: str = "",
     mcp_description: str = "",
+    summary: str = "",
     tags: Optional[List[str]] = None,
     parameters: Optional[List[Dict]] = None,
     request_body=None,
@@ -692,6 +698,7 @@ def register_openapi(
             "name": name,
             "description": description,
             "mcp_description": mcp_description,
+            "summary": summary,
             "tags": tags or [],
             "parameters": parameters or [],
             "request_body": request_body,
@@ -889,6 +896,7 @@ def register_api_class(
                 name=openapi_meta["name"],
                 description=openapi_meta.get("description", ""),
                 mcp_description=openapi_meta.get("mcp_description", ""),
+                summary=openapi_meta.get("summary", ""),
                 tags=openapi_meta.get("tags") or [plugin_name],
                 parameters=all_params,
                 request_body=openapi_meta.get("request_body"),
