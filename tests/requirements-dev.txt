@@ -3,3 +3,6 @@ cryptography>=41.0.0
 pydantic>=2.0.0
 # vault_tools renders its Vault policies with jinja2; pylon supplies it at runtime
 jinja2>=3.0.0
+# the secret-store tests drive the real hvac client through a requests transport fake
+requests>=2.31.0
+hvac==1.1.1
