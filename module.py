@@ -203,6 +203,9 @@ class Module(module.ModuleModel):
         except:  # pylint: disable=W0702
             log.exception("Vault failed to init, secrets WONT WORK")
 
+        from .tools import secret_stores
+        self.descriptor.register_tool('secret_stores', secret_stores)
+
         from .tools import data_tools
         self.descriptor.register_tool('data_tools', data_tools)
 
