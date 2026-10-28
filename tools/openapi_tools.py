@@ -228,6 +228,17 @@ def build_mcp_input_schema(endpoint: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def _base_components() -> dict[str, Any]:
+    """Fresh components object with the auth schemes, shared by every generated spec."""
+    return {
+        "schemas": {},
+        "securitySchemes": {
+            "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+            "sessionAuth": {"type": "apiKey", "in": "cookie", "name": "session"},
+        },
+    }
+
+
 class OpenAPIRegistry:
     """
     Global registry for OpenAPI specifications.
@@ -358,21 +369,7 @@ class OpenAPIRegistry:
                 "description": plugin_info["description"],
             },
             "paths": {},
-            "components": {
-                "schemas": {},
-                "securitySchemes": {
-                    "bearerAuth": {
-                        "type": "http",
-                        "scheme": "bearer",
-                        "bearerFormat": "JWT"
-                    },
-                    "sessionAuth": {
-                        "type": "apiKey",
-                        "in": "cookie",
-                        "name": "session"
-                    }
-                }
-            },
+            "components": _base_components(),
             "security": [{"bearerAuth": []}, {"sessionAuth": []}],
             "tags": plugin_info["tags"],
         }
@@ -401,21 +398,7 @@ class OpenAPIRegistry:
                                "authentication and role-based permissions.",
             },
             "paths": {},
-            "components": {
-                "schemas": {},
-                "securitySchemes": {
-                    "bearerAuth": {
-                        "type": "http",
-                        "scheme": "bearer",
-                        "bearerFormat": "JWT"
-                    },
-                    "sessionAuth": {
-                        "type": "apiKey",
-                        "in": "cookie",
-                        "name": "session"
-                    }
-                }
-            },
+            "components": _base_components(),
             "security": [{"bearerAuth": []}, {"sessionAuth": []}],
             "tags": [],
         }
