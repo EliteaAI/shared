@@ -31,9 +31,10 @@ Usage in plugin module.py:
         )
 """
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
-from pydantic import BaseModel
+from collections.abc import Callable
+from typing import Any
 
+from pydantic import BaseModel
 from pylon.core.tools import log
 
 PROPERTY_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
@@ -57,7 +58,7 @@ def sanitize_property_name(name: str) -> str:
     return sanitized[:64]
 
 
-def pydantic_to_openapi_schema(model: Type[BaseModel]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def pydantic_to_openapi_schema(model: type[BaseModel]) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Convert Pydantic model to OpenAPI schema.
 
@@ -82,9 +83,9 @@ def pydantic_to_openapi_schema(model: Type[BaseModel]) -> Tuple[Dict[str, Any], 
     return schema, definitions
 
 
-def _extract_definitions(obj: Any) -> Dict[str, Any]:
+def _extract_definitions(obj: Any) -> dict[str, Any]:
     """Recursively collect and remove nested $defs/definitions blocks."""
-    collected: Dict[str, Any] = {}
+    collected: dict[str, Any] = {}
 
     if isinstance(obj, dict):
         for defs_key in ("$defs", "definitions"):
@@ -123,7 +124,7 @@ def _convert_refs_to_components(obj):
         return obj
 
 
-def _resolve_refs(obj: Any, definitions: Dict[str, Any]) -> Any:
+def _resolve_refs(obj: Any, definitions: dict[str, Any]) -> Any:
     """Inline $ref values using the definitions map so MCP clients see concrete schemas."""
     if isinstance(obj, dict):
         if "$ref" in obj and len(obj) == 1:
@@ -138,7 +139,7 @@ def _resolve_refs(obj: Any, definitions: Dict[str, Any]) -> Any:
     return obj
 
 
-def _flatten_nullable(schema: Dict[str, Any]) -> Dict[str, Any]:
+def _flatten_nullable(schema: dict[str, Any]) -> dict[str, Any]:
     """Simplify anyOf/oneOf: [T, {type:null}] → T so MCP clients treat it as object, not string."""
     any_of = schema.get("anyOf") or schema.get("oneOf")
     if not isinstance(any_of, list):
@@ -153,7 +154,7 @@ def _flatten_nullable(schema: Dict[str, Any]) -> Dict[str, Any]:
     return schema
 
 
-def build_mcp_input_schema(endpoint: Dict[str, Any]) -> Dict[str, Any]:
+def build_mcp_input_schema(endpoint: dict[str, Any]) -> dict[str, Any]:
     """
     Build MCP inputSchema from OpenAPI endpoint parameters and request body.
     Args: endpoint dictionary with parameters and request_body
@@ -235,9 +236,9 @@ class OpenAPIRegistry:
     """
 
     def __init__(self):
-        self._plugins: Dict[str, Dict] = {}
-        self._endpoints: Dict[str, List[Dict]] = {}
-        self._spec_cache: Dict[str, Any] = {}
+        self._plugins: dict[str, dict] = {}
+        self._endpoints: dict[str, list[dict]] = {}
+        self._spec_cache: dict[str, Any] = {}
 
     def _invalidate_cache(self) -> None:
         self._spec_cache.clear()
@@ -247,9 +248,9 @@ class OpenAPIRegistry:
         plugin_name: str,
         version: str = "1.0.0",
         description: str = "",
-        tags: Optional[List[Dict]] = None,
+        tags: list[dict] | None = None,
         api_module=None,
-        base_path: Optional[str] = None,
+        base_path: str | None = None,
     ) -> None:
         """
         Register a plugin for OpenAPI documentation.
@@ -292,16 +293,17 @@ class OpenAPIRegistry:
         description: str = "",
         mcp_description: str = "",
         summary: str = "",
-        tags: Optional[List[str]] = None,
-        parameters: Optional[List[Dict]] = None,
-        request_body: Optional[Type[BaseModel]] = None,
-        mcp_request_body: Optional[Type[BaseModel]] = None,
-        response_model: Optional[Type[BaseModel]] = None,
-        responses: Optional[Dict] = None,
-        security: Optional[List[Dict]] = None,
+        tags: list[str] | None = None,
+        parameters: list[dict] | None = None,
+        request_body: type[BaseModel] | None = None,
+        mcp_request_body: type[BaseModel] | None = None,
+        response_model: type[BaseModel] | None = None,
+        responses: dict | None = None,
+        security: list[dict] | None = None,
         deprecated: bool = False,
         mcp_tool: bool = False,
         available_to_users: bool = False,
+        tool_name: str = "",
     ) -> None:
         """Register an API endpoint.
 
@@ -333,11 +335,12 @@ class OpenAPIRegistry:
             "deprecated": deprecated,
             "mcp_tool": mcp_tool,
             "available_to_users": available_to_users,
+            "tool_name": tool_name,
         })
         self._invalidate_cache()
 
 
-    def get_plugin_spec(self, plugin_name: str, full: bool = True) -> Dict[str, Any]:
+    def get_plugin_spec(self, plugin_name: str, full: bool = True) -> dict[str, Any]:
         """Generate OpenAPI spec for a single plugin."""
         if plugin_name not in self._plugins:
             return {}
@@ -380,7 +383,7 @@ class OpenAPIRegistry:
         self._spec_cache[cache_key] = spec
         return spec
 
-    def get_combined_spec(self, plugins: Optional[List[str]] = None, full: bool = True) -> Dict[str, Any]:
+    def get_combined_spec(self, plugins: list[str] | None = None, full: bool = True) -> dict[str, Any]:
         """Generate combined OpenAPI spec for multiple plugins."""
         cache_key = f"combined:{','.join(sorted(plugins)) if plugins else 'all'}:full={full}"
         if cache_key in self._spec_cache:
@@ -429,7 +432,7 @@ class OpenAPIRegistry:
         self._spec_cache[cache_key] = spec
         return spec
 
-    def _build_paths(self, spec: Dict, plugin_name: str, full: bool = True) -> None:
+    def _build_paths(self, spec: dict, plugin_name: str, full: bool = True) -> None:
         """Build paths section for a plugin."""
         for endpoint in self._endpoints.get(plugin_name, []):
             if not full and not endpoint.get("available_to_users", False):
@@ -528,7 +531,7 @@ class OpenAPIRegistry:
 
             spec["paths"][path][method] = operation
 
-    def list_plugins(self) -> List[str]:
+    def list_plugins(self) -> list[str]:
         """List all registered plugins."""
         return list(self._plugins.keys())
 
@@ -543,10 +546,10 @@ class OpenAPIRegistry:
 
     def get_mcp_api_tools(
         self,
-        plugins: Optional[List[str]] = None,
+        plugins: list[str] | None = None,
         include_deprecated: bool = False,
-        filter_tags: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
+        filter_tags: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Returns: list of MCP Tool dictionaries with name, description, and inputSchema
 
@@ -576,8 +579,8 @@ class OpenAPIRegistry:
 
     def _endpoint_to_mcp_tool(
         self,
-        endpoint: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+        endpoint: dict[str, Any],
+    ) -> dict[str, Any] | None:
         """
         Convert a single OpenAPI endpoint to MCP Tool format.
         """
@@ -587,7 +590,7 @@ class OpenAPIRegistry:
         mcp_description = endpoint.get("mcp_description", "")
         description = mcp_description or endpoint.get("description", "") or name
         path_parts = [p for p in path.split("/") if p and not p.startswith("{")]
-        tool_name = _sanitize_mcp_tool_name([method] + path_parts[-2:])
+        tool_name = endpoint.get("tool_name") or _sanitize_mcp_tool_name([method] + path_parts[-2:])
 
         args_schema = build_mcp_input_schema(endpoint)
 
@@ -616,7 +619,7 @@ def _sanitize_mcp_tool_name(parts: list) -> str:
     return '_'.join(words)
 
 
-def _collect_spec_tags_from_paths(paths: Dict[str, Any], existing_tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _collect_spec_tags_from_paths(paths: dict[str, Any], existing_tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build tag list from actual operations and keep known descriptions when available."""
     known_tags = {
         str(tag.get("name", "")): tag
@@ -638,7 +641,7 @@ def _collect_spec_tags_from_paths(paths: Dict[str, Any], existing_tags: List[Dic
     return [known_tags.get(name, {"name": name}) for name in used_tag_names]
 
 
-def _order_openapi_tags(tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _order_openapi_tags(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Show elitea_core (and elitea_core/*) tags first, then sort remaining tags."""
     elitea_core_tags = []
     other_tags = []
@@ -664,16 +667,17 @@ def register_openapi(
     description: str = "",
     mcp_description: str = "",
     summary: str = "",
-    tags: Optional[List[str]] = None,
-    parameters: Optional[List[Dict]] = None,
+    tags: list[str] | None = None,
+    parameters: list[dict] | None = None,
     request_body=None,
     mcp_request_body=None,
-    response_model: Optional[Type[BaseModel]] = None,
-    responses: Optional[Dict] = None,
+    response_model: type[BaseModel] | None = None,
+    responses: dict | None = None,
     deprecated: bool = False,
     mcp_tool: bool = False,
     available_to_users: bool = False,
-    path_suffix_override: Optional[str] = None,
+    path_suffix_override: str | None = None,
+    tool_name: str = "",
 ):
     """
     Decorator to document API methods with OpenAPI metadata.
@@ -709,13 +713,14 @@ def register_openapi(
             "mcp_tool": mcp_tool,
             "available_to_users": available_to_users,
             "path_suffix_override": path_suffix_override,
+            "tool_name": tool_name,
         }
         return func
 
     return decorator
 
 
-def extract_path_params_from_url(url_params: List[str]) -> List[Dict]:
+def extract_path_params_from_url(url_params: list[str]) -> list[dict]:
     """
     Extract OpenAPI parameters from Flask url_params.
 
@@ -906,6 +911,7 @@ def register_api_class(
                 deprecated=openapi_meta.get("deprecated", False),
                 mcp_tool=openapi_meta.get("mcp_tool", False),
                 available_to_users=openapi_meta.get("available_to_users", False),
+                tool_name=openapi_meta.get("tool_name", ""),
             )
             endpoints_registered += 1
 
