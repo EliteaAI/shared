@@ -189,11 +189,14 @@ class MinioClientABC(ABC, EventManagerMixin):
         return total_size
 
     def get_file_size(self, bucket: str, filename: str) -> int:
-        response = self.s3_client.list_objects_v2(Bucket=self.format_bucket_name(bucket)).get("Contents", {})
-        for i in response:
-            if str(i["Key"]).lower() == str(filename).lower():
-                return i["Size"]
-        return 0
+        # One HEAD request: listing the bucket only saw its first 1000 objects
+        try:
+            response = self.s3_client.head_object(Bucket=self.format_bucket_name(bucket), Key=filename)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return 0
+            raise
+        return response["ContentLength"]
 
     def get_bucket_tags(self, bucket: str) -> dict:
         try:
