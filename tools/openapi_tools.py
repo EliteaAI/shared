@@ -546,14 +546,16 @@ class OpenAPIRegistry:
         plugins: Optional[List[str]] = None,
         include_deprecated: bool = False,
         filter_tags: Optional[List[str]] = None,
+        public_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Returns: list of MCP Tool dictionaries with name, description, and inputSchema
 
         Args:
             filter_tags: If provided, only return tools whose tags intersect with this list.
+            public_only: Only endpoints marked available_to_users (the public spec without all=true).
         """
-        cache_key = f"mcp:{','.join(sorted(plugins)) if plugins else 'all'}:deprecated={include_deprecated}:tags={','.join(sorted(filter_tags)) if filter_tags else 'all'}"
+        cache_key = f"mcp:{','.join(sorted(plugins)) if plugins else 'all'}:deprecated={include_deprecated}:tags={','.join(sorted(filter_tags)) if filter_tags else 'all'}:public={public_only}"
         if cache_key in self._spec_cache:
             return self._spec_cache[cache_key]
         tools = []
@@ -565,6 +567,8 @@ class OpenAPIRegistry:
                 if endpoint.get("deprecated", False) and not include_deprecated:
                     continue
                 if not endpoint.get("mcp_tool", False):
+                    continue
+                if public_only and not endpoint.get("available_to_users", False):
                     continue
                 if filter_tags and not set(endpoint.get("tags", [])) & set(filter_tags):
                     continue
